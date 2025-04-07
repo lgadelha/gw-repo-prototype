@@ -81,17 +81,17 @@ def get_process_execution_data(trace_file, workflow_id):
         process_execution_data.append({
             "id": item.get('hash'),  
             "workflow_execution_id": workflow_id,  
-            "process_name": item.get("process name"),
+            "process_name": item.get("process"),
             "module_name": item.get("module"),
             "container_name": item.get("container"),
             "final_status": item.get("status"),
             "exit_code": int(item.get("exit")),
-            "start_time": datetime.strptime(item["start_time"], "%Y-%m-%d %H:%M:%S").timestamp(),  
+            "start_time": datetime.strptime(item["start"], "%Y-%m-%d %H:%M:%S.%f").timestamp(),  
             "duration": float(duration_to_seconds(item.get("duration"))),
             "cpus_requested": int(item.get("cpus")),
-            "time_requested": None,  
-            "storage_requested": None,  
-            "memory_requested": None,  
+            "time_requested": float(duration_to_seconds(item.get("time", "0s"))),  
+            "storage_requested": parse_memory_value(item.get("disk", "0 MB")),  
+            "memory_requested": parse_memory_value(item.get("memory", "0 MB")),  
             "realtime": float(item.get("realtime", "0s").rstrip("s")),
             "queue_name": item.get("queue"),
             "percent_cpu": float(item.get("%cpu").rstrip("%")),
@@ -100,8 +100,7 @@ def get_process_execution_data(trace_file, workflow_id):
             "peak_vmem": parse_memory_value(item.get("peak_vmem")),
             "read_char": parse_memory_value(item.get("rchar")),
             "write_char": parse_memory_value(item.get("wchar")),
-        })
-    
+        })    
     return process_execution_data
 
 def parse_memory_value(value):
@@ -120,13 +119,12 @@ def parse_memory_value(value):
 @app.command()
 def submit(log_file: Path, bco_file: Path):
     """Submit Nextflow workflow execution information to GW-RePO API"""
-
     with open(bco_file, "r") as f:
         bco_data = json.load(f)
 
     workflow_execution_data = get_nextflow_log(log_file, bco_data)
 
-    typer.echo(json.dumps(workflow_execution_data, indent=2))
+    # typer.echo(json.dumps(workflow_execution_data, indent=2))
     response = requests.post(f"{API_BASE_URL}/executions/", json=workflow_execution_data)
     if response.status_code != 200:
         typer.echo("Failed to submit workflow execution", err=True)
@@ -137,6 +135,14 @@ def submit(log_file: Path, bco_file: Path):
     typer.echo (f"Processing trace file: {trace_file}")
     workflow_id = workflow_execution_data["id"]
     process_execution_data = get_process_execution_data(trace_file, workflow_id)
+    for entry in process_execution_data:
+        typer.echo(json.dumps(entry, indent=2))
+        response = requests.post(f"{API_BASE_URL}/processes/", json=entry)
+        if response.status_code != 200:
+            typer.echo(f"Failed to submit process execution: {entry['process_name']}", err=True)
+            continue
+        typer.echo(f"Process execution submitted successfully: {entry['process_name']}")
+    typer.echo("All process executions submitted successfully")
 
 if __name__ == "__main__":
     app()
