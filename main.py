@@ -154,14 +154,17 @@ class ProcessExecutionResponse(ProcessExecutionBase):
         from_attributes = True
 
 class ProcessExecutionParameterInputBase(BaseModel):
+    process_execution_id: str
     parameter_name: str
     parameter_value: str
 
 class ProcessExecutionInputFileBase(BaseModel):
+    process_execution_id: str
     filename: str
     md5hash: str
 
 class ProcessExecutionOutputFileBase(BaseModel):
+    process_execution_id: str
     filename: str
     md5hash: str
 
