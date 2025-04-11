@@ -11,6 +11,7 @@ app = typer.Typer()
 
 API_BASE_URL = "http://localhost:8000"
 
+# Converts duration as represented in 'nextflow log' output to seconds
 def duration_to_seconds(duration: str) -> float:
     if duration == "-":
         return 0.0  
@@ -28,12 +29,14 @@ def duration_to_seconds(duration: str) -> float:
 
     return days * 86400 + hours * 3600 + minutes * 60 + seconds
 
+# Extract Nextflow version from BCO provenance file
 def get_nextflow_version(bco_data: dict):
     """Get Nextflow version from BCO file"""
     nextflow_info = next((item for item in bco_data['execution_domain']['software_prerequisites'] if item['name'] == 'Nextflow'), None)
     nextflow_version = nextflow_info['version'] if nextflow_info else None
     return nextflow_version
 
+# Get file path of trace file from log file
 def get_trace_filepath(log_file: Path) -> Path | None:
     pattern = re.compile(r"trace file: (/.+\.txt)")
     with open(log_file, "r") as f:
@@ -43,6 +46,7 @@ def get_trace_filepath(log_file: Path) -> Path | None:
                 return Path(match.group(1))
     return None    
 
+# Extract latest workflow execution info from 'nextflow log'
 def get_nextflow_log(log_file: Path, bco_data: dict):
     """Get workflow execution details using nextflow log command"""
     result = subprocess.run(["nextflow", "log"], capture_output=True, text=True)
@@ -66,6 +70,7 @@ def get_nextflow_log(log_file: Path, bco_data: dict):
         "final_state": execution_data.get("STATUS"),
     }
 
+# Extract process execution data from Nextflow trace file
 def get_process_execution_data(trace_file, workflow_id): 
     """Parse Nextflow trace file and extract process execution data"""
     import uuid
@@ -116,21 +121,45 @@ def parse_memory_value(value):
     except Exception:
         return None
 
+def get_provenance_data(bco_data):
+    process_executions_inputs = []
+    process_executions_outputs = []
+
+    for step in bco_data.get("description_domain", {}).get("pipeline_steps", []):
+    process_id = extract_process_id(step["name"])
+    
+    input_files = [file["uri"] for file in step.get("input_list", [])]
+    output_files = [file["uri"] for file in step.get("output_list", [])]
+    
+    process_executions_inputs.append({
+        "process_execution_id": process_id,
+        "input_files": input_files,
+    })
+
+    process_executions_outputs.append({
+        "process_execution_id": process_id,
+        "input_files": input_files,
+    })
+
+    return (process_executions_inputs, process_executions_outputs)
+
+
+
 @app.command()
 def submit(log_file: Path, bco_file: Path):
-    """Submit Nextflow workflow execution information to GW-RePO API"""
+    """Submit Nextflow workflow and process execution information to GW-RePO API"""
     with open(bco_file, "r") as f:
         bco_data = json.load(f)
 
+    # Get workflow execution data and submit to API
     workflow_execution_data = get_nextflow_log(log_file, bco_data)
-
-    # typer.echo(json.dumps(workflow_execution_data, indent=2))
     response = requests.post(f"{API_BASE_URL}/executions/", json=workflow_execution_data)
     if response.status_code != 200:
         typer.echo("Failed to submit workflow execution", err=True)
         return
     typer.echo("Workflow execution submitted successfully")
 
+    # Get process execution data and submit to API
     trace_file = get_trace_filepath(log_file)
     typer.echo (f"Processing trace file: {trace_file}")
     workflow_id = workflow_execution_data["id"]
@@ -144,5 +173,21 @@ def submit(log_file: Path, bco_file: Path):
         typer.echo(f"Process execution submitted successfully: {entry['process_name']}")
     typer.echo("All process executions submitted successfully")
 
+    # Get provenance data and submit to API
+    (file_inputs, file_outputs) = get_provenance_data(bco_data)
+    for entry in file_inputs:
+        response = requests.post(f"{API_BASE_URL}/input_files/", json=entry)
+        if response.status_code != 200:
+            typer.echo(f"Failed to submit input files: {entry['process_execution_id']}", err=True)
+            continue
+        typer.echo(f"Input files submitted successfully: {entry['process_execution_id']}")
+    for entry in file_outputs:
+        response = requests.post(f"{API_BASE_URL}/output_files/", json=entry)
+        if response.status_code != 200:
+            typer.echo(f"Failed to submit output files: {entry['process_execution_id']}", err=True)
+            continue
+        typer.echo(f"Output files submitted successfully: {entry['process_execution_id']}")
+    typer.echo("All input and output files submitted successfully")
+    
 if __name__ == "__main__":
     app()

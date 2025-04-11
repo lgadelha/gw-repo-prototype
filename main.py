@@ -1,7 +1,7 @@
 import datetime
 from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy import (
-    TIMESTAMP, create_engine, Column, String, Numeric, ForeignKey, Interval
+    create_engine, Column, String, Numeric, ForeignKey
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship
@@ -14,15 +14,12 @@ engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# ----------------------------------------
 # SQLAlchemy Models
-# ----------------------------------------
 
 class WorkflowExecution(Base):
     __tablename__ = "workflow_execution"
     
     id = Column(String, primary_key=True)
-#    start_time = Column(TIMESTAMP)
     start_time = Column(Numeric)
     duration = Column(Numeric)
     run_name = Column(String)
@@ -43,7 +40,6 @@ class ProcessExecution(Base):
     container_name = Column(String)
     final_status = Column(String)
     exit_code = Column(Numeric)
-#    start_time = Column(TIMESTAMP)
     start_time = Column(Numeric)
     duration = Column(Numeric)
     cpus_requested = Column(Numeric)
@@ -97,10 +93,7 @@ class ProcessExecutionOutputFile(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# ----------------------------------------
 # FastAPI App & Dependency
-# ----------------------------------------
-
 app = FastAPI()
 
 def get_db():
@@ -110,12 +103,8 @@ def get_db():
     finally:
         db.close()
 
-# ----------------------------------------
 # Pydantic Models
-# ----------------------------------------
-
 class WorkflowExecutionBase(BaseModel):
-#    start_time: datetime.datetime | None = None
     start_time: float | None = None
     duration: float | None = None
     final_state: str | None = None
@@ -140,7 +129,6 @@ class ProcessExecutionBase(BaseModel):
     container_name: str | None = None
     final_status: str
     exit_code: int | None = None
-#    start_time: datetime.datetime | None = None
     start_time: float | None = None
     duration: float | None = None
     cpus_requested: float | None = None
@@ -165,9 +153,19 @@ class ProcessExecutionResponse(ProcessExecutionBase):
     class Config:
         from_attributes = True
 
+class ProcessExecutionParameterInputBase(BaseModel):
+    parameter_name: str
+    parameter_value: str
+
+class ProcessExecutionInputFileBase(BaseModel):
+    filename: str
+    md5hash: str
+
+class ProcessExecutionOutputFileBase(BaseModel):
+    filename: str
+    md5hash: str
 
 # CRUD Operations 
-
 @app.post("/executions/", response_model=WorkflowExecutionResponse)
 def create_execution(execution: WorkflowExecutionCreate, db: Session = Depends(get_db)):
     db_execution = WorkflowExecution(**execution.model_dump())
@@ -206,4 +204,58 @@ def delete_process_execution(process_id: str, db: Session = Depends(get_db)):
     
     db.delete(process)
     db.commit()
-    return {"message": "Process execution deleted successfully"}
+    return {"message": "Process execution records deleted successfully"}
+
+@app.post("/parameters/", response_model=ProcessExecutionParameterInputBase)
+def create_parameter_input(param: ProcessExecutionParameterInputBase, db: Session = Depends(get_db)):
+    db_param = ProcessExecutionParameterInput(**param.model_dump())
+    db.add(db_param)
+    db.commit()
+    db.refresh(db_param)
+    return db_param
+
+@app.get("/parameters/{process_id}", response_model=list[ProcessExecutionParameterInputBase])
+def get_parameters_by_process(process_id: str, db: Session = Depends(get_db)):
+    return db.query(ProcessExecutionParameterInput).filter_by(process_execution_id=process_id).all()
+
+@app.delete("/parameters/{process_id}")
+def delete_parameters_by_process(process_id: str, db: Session = Depends(get_db)):
+    db.query(ProcessExecutionParameterInput).filter_by(process_execution_id=process_id).delete()
+    db.commit()
+    return {"message": "Parameter records deleted successfully"}
+
+@app.post("/input_files/", response_model=ProcessExecutionInputFileBase)
+def create_input_file(file: ProcessExecutionInputFileBase, db: Session = Depends(get_db)):
+    db_file = ProcessExecutionInputFile(**file.model_dump())
+    db.add(db_file)
+    db.commit()
+    db.refresh(db_file)
+    return db_file
+
+@app.get("/input_files/{process_id}", response_model=list[ProcessExecutionInputFileBase])
+def get_input_files_by_process(process_id: str, db: Session = Depends(get_db)):
+    return db.query(ProcessExecutionInputFile).filter_by(process_execution_id=process_id).all()
+
+@app.delete("/input_files/{process_id}")
+def delete_input_files_by_process(process_id: str, db: Session = Depends(get_db)):
+    db.query(ProcessExecutionInputFile).filter_by(process_execution_id=process_id).delete()
+    db.commit()
+    return {"message": "Input file records deleted successfully"}
+
+@app.post("/output_files/", response_model=ProcessExecutionOutputFileBase)
+def create_output_file(file: ProcessExecutionOutputFileBase, db: Session = Depends(get_db)):
+    db_file = ProcessExecutionOutputFile(**file.model_dump())
+    db.add(db_file)
+    db.commit()
+    db.refresh(db_file)
+    return db_file
+
+@app.get("/output_files/{process_id}", response_model=list[ProcessExecutionOutputFileBase])
+def get_output_files_by_process(process_id: str, db: Session = Depends(get_db)):
+    return db.query(ProcessExecutionOutputFile).filter_by(process_execution_id=process_id).all()
+
+@app.delete("/output_files/{process_id}")
+def delete_output_files_by_process(process_id: str, db: Session = Depends(get_db)):
+    db.query(ProcessExecutionOutputFile).filter_by(process_execution_id=process_id).delete()
+    db.commit()
+    return {"message": "Output file records deleted successfully"}
