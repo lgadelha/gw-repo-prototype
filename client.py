@@ -1,9 +1,11 @@
 import typer
 import requests
 import json
-import uuid
 import subprocess
 import re
+import hashlib
+import os
+from urllib.parse import urlparse, unquote
 from pathlib import Path
 from datetime import datetime
 
@@ -125,6 +127,46 @@ def parse_memory_value(value):
 def extract_process_id(name: str) -> str:
     return f"{name[:2]}/{name[2:8]}"
 
+def get_file_md5(filename):
+    with open(filename, 'rb', buffering=0) as f:
+        return hashlib.file_digest(f, 'md5').hexdigest()
+
+def get_directory_md5(dirname):
+    files = []
+
+    for root, _, filenames in os.walk(dirname):
+        for filename in filenames:
+            files.append(os.path.join(root, filename))
+
+    files.sort()
+
+    md5_hashes = []
+    for file in files:
+        md5 = hashlib.md5()
+        try:
+            with open(file, "rb") as f:
+                for chunk in iter(lambda: f.read(4096), b""):
+                    md5.update(chunk)
+            md5_hashes.append(f"{md5.hexdigest()}  {file}")
+        except Exception as e:
+            print(f"Skipping {file}: {e}")
+
+    final_md5 = hashlib.md5()
+    for line in md5_hashes:
+        final_md5.update(line.encode())
+
+    return final_md5.hexdigest()
+
+def get_obj_md5(obj):
+    parsed_url = urlparse(obj).path
+    full_path = unquote(parsed_url)
+    if os.path.isfile(full_path):
+        return get_file_md5(full_path)
+    elif os.path.isdir(full_path):
+        return get_directory_md5(full_path)
+    else:
+        return None
+
 # Extract provenance from BCO file
 def get_provenance_data(bco_data):
     process_executions_inputs = []
@@ -136,20 +178,24 @@ def get_provenance_data(bco_data):
         input_files = [file["uri"] for file in step.get("input_list", [])]
         output_files = [file["uri"] for file in step.get("output_list", [])]
     
-        for input_file in input_files:            
+        for input_file in input_files:          
+            md5hash = get_obj_md5(input_file)  
             process_executions_inputs.append({
                 "process_execution_id": process_id,
                 "filename": input_file,
-                "md5hash": "",  
+                "md5hash": md5hash,  
             })
         for output_file in output_files:
+            md5hash = get_obj_md5(output_file)  
             process_executions_outputs.append({
                 "process_execution_id": process_id,
                 "filename": output_file,
-                "md5hash": "",  # Assuming the filename contains the hash
+                "md5hash": md5hash, 
             })
 
     return (process_executions_inputs, process_executions_outputs)
+
+
 
 @app.command()
 def submit(log_file: Path, bco_file: Path):
@@ -171,30 +217,28 @@ def submit(log_file: Path, bco_file: Path):
     workflow_id = workflow_execution_data["id"]
     process_execution_data = get_process_execution_data(trace_file, workflow_id)
     for entry in process_execution_data:
-        typer.echo(json.dumps(entry, indent=2))
         response = requests.post(f"{API_BASE_URL}/processes/", json=entry)
         if response.status_code != 200:
             typer.echo(f"Failed to submit process execution: {entry['process_name']}", err=True)
-            continue
+            return
         typer.echo(f"Process execution submitted successfully: {entry['process_name']}")
     typer.echo("All process executions submitted successfully")
 
     # Get provenance data and submit to API
+    typer.echo (f"Processing provenance file: {bco_file}") 
     (file_inputs, file_outputs) = get_provenance_data(bco_data)
     for entry in file_inputs:
-        typer.echo(json.dumps(entry, indent=2))
         response = requests.post(f"{API_BASE_URL}/input_files/", json=entry)
         if response.status_code != 200:
-            typer.echo(f"Failed to submit input files: {entry['process_execution_id']}", err=True)
-            continue
-        typer.echo(f"Input files submitted successfully: {entry['process_execution_id']}")
+            typer.echo(f"Failed to submit input files: {entry['filename']}", err=True)
+            return
+        typer.echo(f"Input files submitted successfully: {entry['filename']}")
     for entry in file_outputs:
-        typer.echo(json.dumps(entry, indent=2))
         response = requests.post(f"{API_BASE_URL}/output_files/", json=entry)
         if response.status_code != 200:
-            typer.echo(f"Failed to submit output files: {entry['process_execution_id']}", err=True)
-            continue
-        typer.echo(f"Output files submitted successfully: {entry['process_execution_id']}")
+            typer.echo(f"Failed to submit output files: {entry['filename']}", err=True)
+            return
+        typer.echo(f"Output files submitted successfully: {entry['filename']}")
     typer.echo("All input and output files submitted successfully")
 
 if __name__ == "__main__":
