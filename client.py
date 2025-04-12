@@ -3,8 +3,9 @@ import requests
 import json
 import subprocess
 import re
-import hashlib
+#import hashlib
 import os
+import xxhash
 from urllib.parse import urlparse, unquote
 from pathlib import Path
 from datetime import datetime
@@ -127,43 +128,44 @@ def parse_memory_value(value):
 def extract_process_id(name: str) -> str:
     return f"{name[:2]}/{name[2:8]}"
 
-def get_file_md5(filename):
+def get_file_xxhash128(filename):
     with open(filename, 'rb', buffering=0) as f:
-        return hashlib.file_digest(f, 'md5').hexdigest()
+        h = xxhash.xxh128()
+        # Read the file in chunks to avoid memory issues with large files
+        for chunk in iter(lambda: f.read(4096), b""):
+            h.update(chunk)
+        return h.hexdigest()
 
-def get_directory_md5(dirname):
+def get_directory_xxhash128(dirname):
     files = []
-
     for root, _, filenames in os.walk(dirname):
         for filename in filenames:
             files.append(os.path.join(root, filename))
-
     files.sort()
-
-    md5_hashes = []
+    
+    xxhash_values = []
     for file in files:
-        md5 = hashlib.md5()
         try:
+            file_hash = xxhash.xxh128()
             with open(file, "rb") as f:
                 for chunk in iter(lambda: f.read(4096), b""):
-                    md5.update(chunk)
-            md5_hashes.append(f"{md5.hexdigest()}  {file}")
+                    file_hash.update(chunk)
+            xxhash_values.append(f"{file_hash.hexdigest()} {file}")
         except Exception as e:
             print(f"Skipping {file}: {e}")
+    
+    final_hash = xxhash.xxh128()
+    for line in xxhash_values:
+        final_hash.update(line.encode())
+    return final_hash.hexdigest()
 
-    final_md5 = hashlib.md5()
-    for line in md5_hashes:
-        final_md5.update(line.encode())
-
-    return final_md5.hexdigest()
-
-def get_obj_md5(obj):
+def get_obj_xxhash128(obj):
     parsed_url = urlparse(obj).path
     full_path = unquote(parsed_url)
     if os.path.isfile(full_path):
-        return get_file_md5(full_path)
+        return get_file_xxhash128(full_path)
     elif os.path.isdir(full_path):
-        return get_directory_md5(full_path)
+        return get_directory_xxhash128(full_path)
     else:
         return None
 
@@ -179,18 +181,18 @@ def get_provenance_data(bco_data):
         output_files = [file["uri"] for file in step.get("output_list", [])]
     
         for input_file in input_files:          
-            md5hash = get_obj_md5(input_file)  
+            xxhash128 = get_obj_xxhash128(input_file)  
             process_executions_inputs.append({
                 "process_execution_id": process_id,
                 "filename": input_file,
-                "md5hash": md5hash,  
+                "xxhash128": xxhash128,  
             })
         for output_file in output_files:
-            md5hash = get_obj_md5(output_file)  
+            xxhash128 = get_obj_xxhash128(output_file)  
             process_executions_outputs.append({
                 "process_execution_id": process_id,
                 "filename": output_file,
-                "md5hash": md5hash, 
+                "xxhash128": xxhash128, 
             })
 
     return (process_executions_inputs, process_executions_outputs)
@@ -205,7 +207,7 @@ def submit(log_file: Path, bco_file: Path):
 
     # Get workflow execution data and submit to API
     workflow_execution_data = get_nextflow_log(log_file, bco_data)
-    response = requests.post(f"{API_BASE_URL}/executions/", json=workflow_execution_data)
+    response = requests.post(f"{API_BASE_URL}/workflows/", json=workflow_execution_data)
     if response.status_code != 200:
         typer.echo("Failed to submit workflow execution", err=True)
         return

@@ -76,7 +76,7 @@ class ProcessExecutionInputFile(Base):
 
     process_execution_id = Column(String, ForeignKey("process_execution.id"), primary_key=True)
     filename = Column(String, primary_key=True)
-    md5hash = Column(String, primary_key=True)
+    xxhash128 = Column(String, primary_key=True)
 
     process_execution = relationship("ProcessExecution", back_populates="input_files")
 
@@ -86,7 +86,7 @@ class ProcessExecutionOutputFile(Base):
 
     process_execution_id = Column(String, ForeignKey("process_execution.id"), primary_key=True)
     filename = Column(String, primary_key=True)
-    md5hash = Column(String, primary_key=True)
+    xxhash128 = Column(String, primary_key=True)
 
     process_execution = relationship("ProcessExecution", back_populates="output_files")
 
@@ -161,15 +161,15 @@ class ProcessExecutionParameterInputBase(BaseModel):
 class ProcessExecutionInputFileBase(BaseModel):
     process_execution_id: str
     filename: str
-    md5hash: str
+    xxhash128: str
 
 class ProcessExecutionOutputFileBase(BaseModel):
     process_execution_id: str
     filename: str
-    md5hash: str
+    xxhash128: str
 
 # CRUD Operations 
-@app.post("/executions/", response_model=WorkflowExecutionResponse)
+@app.post("/workflows/", response_model=WorkflowExecutionResponse)
 def create_execution(execution: WorkflowExecutionCreate, db: Session = Depends(get_db)):
     db_execution = WorkflowExecution(**execution.model_dump())
     db.add(db_execution)
@@ -177,7 +177,7 @@ def create_execution(execution: WorkflowExecutionCreate, db: Session = Depends(g
     db.refresh(db_execution)
     return db_execution
 
-@app.get("/executions/{execution_id}", response_model=WorkflowExecutionResponse)
+@app.get("/workflows/{execution_id}", response_model=WorkflowExecutionResponse)
 def read_execution(execution_id: str, db: Session = Depends(get_db)):
     execution = db.query(WorkflowExecution).filter(WorkflowExecution.id == execution_id).first()
     if execution is None:
