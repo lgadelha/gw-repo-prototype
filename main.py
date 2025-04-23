@@ -125,24 +125,24 @@ class WorkflowExecutionResponse(WorkflowExecutionBase):
 class ProcessExecutionBase(BaseModel):
     workflow_execution_id: str
     process_name: str
-    module_name: str
+    module_name: str | None = None
     container_name: str | None = None
     final_status: str
-    exit_code: int | None = None
-    start_time: float | None = None
-    duration: float | None = None
+    exit_code: int 
+    start_time: float 
+    duration: float 
     cpus_requested: float | None = None
     time_requested: float | None = None
     storage_requested: float | None = None
     memory_requested: float | None = None
-    realtime: float | None = None
+    realtime: float 
     queue_name: str | None = None
-    percent_cpu: float | None = None
-    percent_memory: float | None = None
-    peak_rss: float | None = None
-    peak_vmem: float | None = None
-    read_char: float | None = None
-    write_char: float | None = None
+    percent_cpu: float 
+    percent_memory: float 
+    peak_rss: float 
+    peak_vmem: float
+    read_char: float
+    write_char: float
 
 class ProcessExecutionCreate(ProcessExecutionBase):
     id: str
