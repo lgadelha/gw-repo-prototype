@@ -12,7 +12,7 @@ from datetime import datetime
 
 app = typer.Typer()
 
-API_BASE_URL = "http://localhost:8000"
+API_BASE_URL = "http://localhost:80"
 
 # Converts duration as represented in 'nextflow log' output to seconds
 def duration_to_seconds(duration: str) -> float:

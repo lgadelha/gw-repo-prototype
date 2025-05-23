@@ -8,7 +8,7 @@ from sqlalchemy.orm import sessionmaker, Session, relationship
 from pydantic import BaseModel
 import os
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@localhost/dbname")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@db/dbname")
 
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

@@ -1,4 +1,5 @@
 fastapi[standard]
 pydantic
 sqlalchemy
+psycopg2
 xxhash

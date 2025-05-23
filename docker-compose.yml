@@ -2,6 +2,18 @@
 
 services:
 
+  api:
+    image: wf-obs-api
+    build: ./api
+    depends_on:
+      db:
+        condition: service_started
+    networks:
+      - gw-repo-network
+    environment:
+      DATABASE_URL: postgresql://postgres:example@db/wf-obs
+    ports:
+      - "80:80"
   db:
     image: postgres
     restart: always
@@ -19,11 +31,9 @@ services:
       POSTGRES_DB: wf-obs
     ports:
       - "5432:5432"  
+    networks:
+      - gw-repo-network
 
-
-  adminer:
-    image: adminer
-    restart: always
-    ports:
-      - 8080:8080
+networks:
+  gw-repo-network:
 
