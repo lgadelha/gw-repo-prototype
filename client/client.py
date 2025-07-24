@@ -200,14 +200,20 @@ def get_provenance_data(bco_data):
 
 
 @app.command()
-def submit(log_file: Path, bco_file: Path):
+def submit(log_file: Path, bco_file: Path, api_key: str = typer.Option(..., help="API key for authentication")):
     """Submit Nextflow workflow and process execution information to GW-RePO API"""
     with open(bco_file, "r") as f:
         bco_data = json.load(f)
 
+    # Authentication headers
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+
     # Get workflow execution data and submit to API
     workflow_execution_data = get_nextflow_log(log_file, bco_data)
-    response = requests.post(f"{API_BASE_URL}/workflows/", json=workflow_execution_data)
+    response = requests.post(f"{API_BASE_URL}/workflows/", json=workflow_execution_data, headers=headers)
     if response.status_code != 200:
         typer.echo("Failed to submit workflow execution", err=True)
         return
@@ -219,7 +225,7 @@ def submit(log_file: Path, bco_file: Path):
     workflow_id = workflow_execution_data["id"]
     process_execution_data = get_process_execution_data(trace_file, workflow_id)
     for entry in process_execution_data:
-        response = requests.post(f"{API_BASE_URL}/processes/", json=entry)
+        response = requests.post(f"{API_BASE_URL}/processes/", json=entry, headers=headers)
         if response.status_code != 200:
             typer.echo(f"Failed to submit process execution: {entry['process_name']}", err=True)
             return
@@ -230,13 +236,13 @@ def submit(log_file: Path, bco_file: Path):
     typer.echo (f"Processing provenance file: {bco_file}") 
     (file_inputs, file_outputs) = get_provenance_data(bco_data)
     for entry in file_inputs:
-        response = requests.post(f"{API_BASE_URL}/input_files/", json=entry)
+        response = requests.post(f"{API_BASE_URL}/input_files/", json=entry, headers=headers)
         if response.status_code != 200:
             typer.echo(f"Failed to submit input files: {entry['filename']}", err=True)
             return
         typer.echo(f"Input files submitted successfully: {entry['filename']}")
     for entry in file_outputs:
-        response = requests.post(f"{API_BASE_URL}/output_files/", json=entry)
+        response = requests.post(f"{API_BASE_URL}/output_files/", json=entry, headers=headers)
         if response.status_code != 200:
             typer.echo(f"Failed to submit output files: {entry['filename']}", err=True)
             return

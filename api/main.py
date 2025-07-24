@@ -1,12 +1,25 @@
-import datetime
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Security
+from fastapi.security import HTTPBearer, HTTAuthorizationCredentials
 from sqlmodel import SQLModel, Field, create_engine, Session, Relationship, select
-from typing import Optional, List
+from typing import Optional, List, Annotated
 import os
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@db/dbname")
 engine = create_engine(DATABASE_URL, echo=True)
 
+# API Key Authentication
+API_KEY = os.getenv("API_KEY", "enter_default_api_key_here")
+if not API_KEY:
+    raise EnvironmentError("Missing API_KEY environment variable")
+security = HTTPBearer()
+
+def verify_api_key(credentials: HTTAuthorizationCredentials = Security(security)):
+    if credentials.credentials != API_KEY:
+        raise HTTPException(
+            status_code=401, # Unauthorized
+            detail="Invalid API Key"
+        )
+    return credentials.credentials
 
 # SQLModel Models
 class ProcessExecutionParameterInput(SQLModel, table=True):
@@ -86,35 +99,39 @@ def on_startup():
 # Routes
 
 @app.post("/workflows/", response_model=WorkflowExecution)
-def create_workflow(execution: WorkflowExecution, session: Session = Depends(get_session)):
+def create_workflow(
+    execution: WorkflowExecution, 
+    session: Session = Depends(get_session), 
+    api_key: str = Depends(verify_api_key)
+):
     session.add(execution)
     session.commit()
     session.refresh(execution)
     return execution
 
 @app.get("/workflows/{execution_id}", response_model=WorkflowExecution)
-def get_workflow(execution_id: str, session: Session = Depends(get_session)):
+def get_workflow(execution_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
     workflow = session.get(WorkflowExecution, execution_id)
     if not workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
     return workflow
 
 @app.post("/processes/", response_model=ProcessExecution)
-def create_process(process: ProcessExecution, session: Session = Depends(get_session)):
+def create_process(process: ProcessExecution, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
     session.add(process)
     session.commit()
     session.refresh(process)
     return process
 
 @app.get("/processes/{process_id}", response_model=ProcessExecution)
-def get_process(process_id: str, session: Session = Depends(get_session)):
+def get_process(process_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
     process = session.get(ProcessExecution, process_id)
     if not process:
         raise HTTPException(status_code=404, detail="Process not found")
     return process
 
 @app.delete("/processes/{process_id}")
-def delete_process(process_id: str, session: Session = Depends(get_session)):
+def delete_process(process_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
     process = session.get(ProcessExecution, process_id)
     if not process:
         raise HTTPException(status_code=404, detail="Process not found")
@@ -123,19 +140,19 @@ def delete_process(process_id: str, session: Session = Depends(get_session)):
     return {"message": "Process deleted successfully"}
 
 @app.post("/parameters/", response_model=ProcessExecutionParameterInput)
-def create_parameter(param: ProcessExecutionParameterInput, session: Session = Depends(get_session)):
+def create_parameter(param: ProcessExecutionParameterInput, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
     session.add(param)
     session.commit()
     session.refresh(param)
     return param
 
 @app.get("/parameters/{process_id}", response_model=List[ProcessExecutionParameterInput])
-def get_parameters(process_id: str, session: Session = Depends(get_session)):
+def get_parameters(process_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
     result = session.exec(select(ProcessExecutionParameterInput).where(ProcessExecutionParameterInput.process_execution_id == process_id)).all()
     return result
 
 @app.delete("/parameters/{process_id}")
-def delete_parameters(process_id: str, session: Session = Depends(get_session)):
+def delete_parameters(process_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
     session.exec(
         select(ProcessExecutionParameterInput)
         .where(ProcessExecutionParameterInput.process_execution_id == process_id)
@@ -144,35 +161,35 @@ def delete_parameters(process_id: str, session: Session = Depends(get_session)):
     return {"message": "Parameters deleted successfully"}
 
 @app.post("/input_files/", response_model=ProcessExecutionInputFile)
-def create_input_file(file: ProcessExecutionInputFile, session: Session = Depends(get_session)):
+def create_input_file(file: ProcessExecutionInputFile, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
     session.add(file)
     session.commit()
     session.refresh(file)
     return file
 
 @app.get("/input_files/{process_id}", response_model=List[ProcessExecutionInputFile])
-def get_input_files(process_id: str, session: Session = Depends(get_session)):
+def get_input_files(process_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
     return session.exec(select(ProcessExecutionInputFile).where(ProcessExecutionInputFile.process_execution_id == process_id)).all()
 
 @app.delete("/input_files/{process_id}")
-def delete_input_files(process_id: str, session: Session = Depends(get_session)):
+def delete_input_files(process_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
     session.exec(select(ProcessExecutionInputFile).where(ProcessExecutionInputFile.process_execution_id == process_id)).delete()
     session.commit()
     return {"message": "Input files deleted successfully"}
 
 @app.post("/output_files/", response_model=ProcessExecutionOutputFile)
-def create_output_file(file: ProcessExecutionOutputFile, session: Session = Depends(get_session)):
+def create_output_file(file: ProcessExecutionOutputFile, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
     session.add(file)
     session.commit()
     session.refresh(file)
     return file
 
 @app.get("/output_files/{process_id}", response_model=List[ProcessExecutionOutputFile])
-def get_output_files(process_id: str, session: Session = Depends(get_session)):
+def get_output_files(process_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
     return session.exec(select(ProcessExecutionOutputFile).where(ProcessExecutionOutputFile.process_execution_id == process_id)).all()
 
 @app.delete("/output_files/{process_id}")
-def delete_output_files(process_id: str, session: Session = Depends(get_session)):
+def delete_output_files(process_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
     session.exec(select(ProcessExecutionOutputFile).where(ProcessExecutionOutputFile.process_execution_id == process_id)).delete()
     session.commit()
     return {"message": "Output files deleted successfully"}
