@@ -8,7 +8,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@db/dbname")
 engine = create_engine(DATABASE_URL, echo=True)
 
 # API Key Authentication
-API_KEY = os.getenv("API_KEY", "enter_default_api_key_here")
+API_KEY = os.getenv("API_KEY")
 if not API_KEY:
     raise EnvironmentError("Missing API_KEY environment variable")
 security = HTTPBearer()

@@ -8,10 +8,10 @@ services:
     depends_on:
       db:
         condition: service_started
+    env_file:
+      - ./api/.env
     networks:
       - gw-repo-network
-    environment:
-      DATABASE_URL: postgresql://postgres:example@db/wf-obs
     ports:
       - "80:80"
   db:
@@ -26,9 +26,8 @@ services:
     #    target: /dev/shm
     #    tmpfs:
     #      size: 134217728 # 128*2^20 bytes = 128Mb
-    environment:
-      POSTGRES_PASSWORD: example
-      POSTGRES_DB: wf-obs
+    env_file:
+      - ./db/.env
     ports:
       - "5432:5432"  
     networks:
