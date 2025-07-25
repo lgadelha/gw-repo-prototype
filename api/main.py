@@ -1,8 +1,8 @@
 from fastapi import FastAPI, Depends, HTTPException, Security
-from fastapi.security import HTTPBearer, HTTAuthorizationCredentials
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlmodel import SQLModel, Field, create_engine, Session, Relationship, select
 from typing import Optional, List, Annotated
-import os
+import os, time
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@db/dbname")
 engine = create_engine(DATABASE_URL, echo=True)
@@ -13,7 +13,7 @@ if not API_KEY:
     raise EnvironmentError("Missing API_KEY environment variable")
 security = HTTPBearer()
 
-def verify_api_key(credentials: HTTAuthorizationCredentials = Security(security)):
+def verify_api_key(credentials: HTTPAuthorizationCredentials = Security(security)):
     if credentials.credentials != API_KEY:
         raise HTTPException(
             status_code=401, # Unauthorized
