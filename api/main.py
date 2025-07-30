@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, Security
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlmodel import SQLModel, Field, create_engine, Session, Relationship, select
+from sqlmodel import SQLModel, Field, create_engine, Session, Relationship, select, delete
 from typing import Optional, List, Annotated
 import os, time
 
@@ -154,9 +154,9 @@ def get_parameters(process_id: str, session: Session = Depends(get_session), api
 @app.delete("/parameters/{process_id}")
 def delete_parameters(process_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
     session.exec(
-        select(ProcessExecutionParameterInput)
+        delete(ProcessExecutionParameterInput)
         .where(ProcessExecutionParameterInput.process_execution_id == process_id)
-    ).delete()
+    )
     session.commit()
     return {"message": "Parameters deleted successfully"}
 
@@ -173,7 +173,10 @@ def get_input_files(process_id: str, session: Session = Depends(get_session), ap
 
 @app.delete("/input_files/{process_id}")
 def delete_input_files(process_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
-    session.exec(select(ProcessExecutionInputFile).where(ProcessExecutionInputFile.process_execution_id == process_id)).delete()
+    session.exec(
+        delete(ProcessExecutionInputFile)
+        .where(ProcessExecutionInputFile.process_execution_id == process_id)
+    )
     session.commit()
     return {"message": "Input files deleted successfully"}
 
@@ -190,6 +193,9 @@ def get_output_files(process_id: str, session: Session = Depends(get_session), a
 
 @app.delete("/output_files/{process_id}")
 def delete_output_files(process_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
-    session.exec(select(ProcessExecutionOutputFile).where(ProcessExecutionOutputFile.process_execution_id == process_id)).delete()
+    session.exec(
+        delete(ProcessExecutionOutputFile)
+        .where(ProcessExecutionOutputFile.process_execution_id == process_id)
+    )
     session.commit()
     return {"message": "Output files deleted successfully"}
