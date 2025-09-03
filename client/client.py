@@ -9,10 +9,13 @@ import xxhash
 from urllib.parse import urlparse, unquote
 from pathlib import Path
 from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = typer.Typer()
 
-API_BASE_URL = "http://localhost:80"
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:80")
 
 # Converts duration as represented in 'nextflow log' output to seconds
 def duration_to_seconds(duration: str) -> float:
@@ -200,11 +203,18 @@ def get_provenance_data(bco_data):
 
 
 @app.command()
-def submit(log_file: Path, bco_file: Path, api_key: str = typer.Option(..., help="API key for authentication")):
+def submit(log_file: Path, bco_file: Path, api_key: str = typer.Option(None, help="API key for authentication")):
     """Submit Nextflow workflow and process execution information to GW-RePO API"""
     with open(bco_file, "r") as f:
         bco_data = json.load(f)
 
+    # Get API key from environment if not provided
+    if api_key is None:
+        api_key = os.getenv("API_KEY")
+        if api_key is None:
+            typer.echo("API key must be provided either as argument or API_KEY environment variable", err=True)
+            return
+    
     # Authentication headers
     headers = {
         "Authorization": f"Bearer {api_key}",
