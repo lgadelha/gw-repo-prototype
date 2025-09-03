@@ -22,7 +22,7 @@ def duration_to_seconds(duration: str) -> float:
     if duration == "-":
         return 0.0  
     
-    pattern = re.compile(r'(?:(\d+\.?\d*)d)?\s*(?:(\d+\.?\d*)h)?\s*(?:(\d+\.?\d*)m)?\s*(?:(\d+\.?\d*)s)?')
+    pattern = re.compile(r'(?:(\d+\.?\d*)d)?\s*(?:(\d+\.?\d*)h)?\s*(?:(\d+\.?\d*)m)?\s*(?:(\d+\.?\d*)s)?\s*(?:(\d+\.?\d*)ms)?')
     match = pattern.fullmatch(duration.strip())
 
     if not match:
@@ -32,8 +32,9 @@ def duration_to_seconds(duration: str) -> float:
     hours = float(match.group(2)) if match.group(2) else 0
     minutes = float(match.group(3)) if match.group(3) else 0
     seconds = float(match.group(4)) if match.group(4) else 0
+    milliseconds = float(match.group(5)) if match.group(5) else 0
 
-    return days * 86400 + hours * 3600 + minutes * 60 + seconds
+    return days * 86400 + hours * 3600 + minutes * 60 + seconds + milliseconds / 1000
 
 # Extract Nextflow version from BCO provenance file
 def get_nextflow_version(bco_data: dict):
@@ -180,11 +181,14 @@ def get_provenance_data(bco_data):
     for step in bco_data.get("description_domain", {}).get("pipeline_steps", []):
         process_id = extract_process_id(step["name"])
     
-        input_files = [file["uri"] for file in step.get("input_list", [])]
-        output_files = [file["uri"] for file in step.get("output_list", [])]
+        input_files = list(set([file["uri"] for file in step.get("input_list", [])]))
+        output_files = list(set([file["uri"] for file in step.get("output_list", [])]))
     
-        for input_file in input_files:          
-            xxhash128 = get_obj_xxhash128(input_file)  
+        for input_file in input_files:
+            if input_file.startswith(('http://', 'https://')):
+                xxhash128 = None
+            else:
+                xxhash128 = get_obj_xxhash128(input_file)  
             process_executions_inputs.append({
                 "process_execution_id": process_id,
                 "filename": input_file,

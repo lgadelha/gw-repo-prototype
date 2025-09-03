@@ -32,14 +32,14 @@ class ProcessExecutionParameterInput(SQLModel, table=True):
 class ProcessExecutionInputFile(SQLModel, table=True):
     process_execution_id: str = Field(foreign_key="processexecution.id", primary_key=True)
     filename: str = Field(primary_key=True)
-    xxhash128: str = Field(primary_key=True)
+    xxhash128: str = None
 
     process_execution: Optional["ProcessExecution"] = Relationship(back_populates="input_files")
 
 class ProcessExecutionOutputFile(SQLModel, table=True):
     process_execution_id: str = Field(foreign_key="processexecution.id", primary_key=True)
     filename: str = Field(primary_key=True)
-    xxhash128: str = Field(primary_key=True)
+    xxhash128: str = None
 
     process_execution: Optional["ProcessExecution"] = Relationship(back_populates="output_files")
 
