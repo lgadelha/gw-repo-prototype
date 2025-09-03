@@ -30,7 +30,7 @@ docker compose up -d --build
 Install the requirements:
 
 ```bash
-pip install typer requests xxhash
+pip install typer requests xxhash python-dotenv
 ```
 
 ## Nextflow configuration
@@ -60,18 +60,25 @@ After that you can run your workflows as usual.
 
 ## Client configuration
 
-Modify the variable `API_BASE_URL` so that it points to your deployment of the GW-RePO API.
+Create a `.env` file in the `client/` directory with the following variables:
+
+```bash
+API_BASE_URL=http://localhost:80
+API_KEY=your_api_key_here
+```
+
+Alternatively, you can set these as environment variables or provide the API key as a command line argument.
 
 ## Client usage
 
 `client.py` can be used for extracting the execution metrics and provenance information and sending them to the API:
 
 ```
-python client.py submit <log_file> <bco_file> --api-key <your_api_key>
+python client.py submit <log_file> <bco_file> [--api-key <your_api_key>]
 ```
 
 Parameters:
 
 - `log_file`: Path to the Nextflow log file (`.nextflow.log`)
 - `bco_file`: Path to the BCO provenance file (`bco-*.json`)
-- `--api-key`: API key for authentication with the GW-RePO API
+- `--api-key`: API key for authentication (optional if set in environment)
