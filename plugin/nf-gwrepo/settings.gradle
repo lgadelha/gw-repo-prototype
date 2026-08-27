@@ -1,0 +1,7 @@
+plugins {
+    // Let Gradle auto-provision the Java 21 toolchain the nextflow-plugin build needs,
+    // so `./gradlew build` works without a system JDK 21 install.
+    id 'org.gradle.toolchains.foojay-resolver-convention' version '1.0.0'
+}
+
+rootProject.name = 'nf-gwrepo'
