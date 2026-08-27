@@ -325,3 +325,10 @@ All settings in `.env`:
 ---
 
 **Full documentation**: `doc/README.md`
+
+## AI-assisted development
+
+Parts of this codebase were written with AI coding assistants. All 
+contributions were reviewed, tested and are maintained by the 
+authors listed in CITATION.cff, who are solely responsible for the 
+correctness of the code. No AI system is credited as an author.
