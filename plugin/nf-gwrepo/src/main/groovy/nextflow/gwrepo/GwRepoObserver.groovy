@@ -16,18 +16,32 @@
 
 package nextflow.gwrepo
 
+import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.Paths
+import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
+
+import groovy.json.JsonOutput
 import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
 import nextflow.Session
+import nextflow.processor.TaskRun
+import nextflow.script.params.FileOutParam
 import nextflow.trace.TraceObserverV2
 import nextflow.trace.event.TaskEvent
 
 /**
- * Streams workflow + per-task resource metrics to the GW-RePO API as a run proceeds.
+ * Streams workflow, per-task resource metrics and file provenance to the GW-RePO API
+ * as a run proceeds.
  *
- * Step 2: workflow stub on flow create, one process row per completed/cached task,
- * workflow re-POST on flow complete for {@code duration}/{@code final_state}.
- * Provenance (input/output file checksums) is Step 3.
+ * - {@code onFlowCreate}: register the institute + a {@code WorkflowExecution} stub, and
+ *   drop a {@code .gwrepo-run.json} marker in the launch dir for the post-run CO2 importer.
+ * - {@code onTaskComplete} / {@code onTaskCached}: one {@code ProcessExecution} row, plus
+ *   {@code ProcessExecutionInputFile} / {@code ProcessExecutionOutputFile} rows carrying a
+ *   SHA-256 of each file's content (hashed on the background thread).
+ * - {@code onFlowComplete}: re-POST the workflow with {@code duration} / {@code final_state}.
  */
 @Slf4j
 @CompileStatic
@@ -38,6 +52,10 @@ class GwRepoObserver implements TraceObserverV2 {
     private Session session
     private String workflowId
     private GwRepoClient client
+    private boolean finalized = false
+
+    /** task_id (as reported in the trace record) -> process_execution_id, for the CO2 importer. */
+    private final Map<String,String> taskProcessIds = new ConcurrentHashMap<String,String>()
 
     GwRepoObserver(GwRepoConfig config) {
         this.config = config
@@ -62,18 +80,46 @@ class GwRepoObserver implements TraceObserverV2 {
         client.post('/institutes/', [id: config.institute, name: config.institute])
 
         client.post('/workflows/', workflowPayload())
+        writeRunMarker()
         log.info "[nf-gwrepo] workflow ${workflowId} registered (run_name=${session.runName})"
+    }
+
+    /**
+     * Write {@code <launchDir>/.gwrepo-run.json} so the post-run CO2 importer
+     * (co2-import/submit_co2.py) can attach nf-co2footprint's output to the right rows:
+     * {@code workflow_id}, {@code endpoint}, and a {@code task_id -> process_execution_id}
+     * map (nf-co2footprint's provenance file identifies tasks only by {@code task_id}).
+     * Written at {@code onFlowCreate} (map still empty) and again, complete, at
+     * {@code onFlowComplete}. Overwritten each run; the importer takes the newest.
+     */
+    private void writeRunMarker() {
+        try {
+            final dir = session.workflowMetadata?.launchDir ?: Paths.get('').toAbsolutePath()
+            final marker = dir.resolve('.gwrepo-run.json')
+            final json = JsonOutput.toJson([
+                workflow_id: workflowId,
+                endpoint   : config.endpoint,
+                processes  : new LinkedHashMap<String,String>(taskProcessIds),
+            ])
+            Files.write(marker, json.getBytes(StandardCharsets.UTF_8))
+        }
+        catch( Exception e ) {
+            log.warn "[nf-gwrepo] could not write .gwrepo-run.json: ${e.message} -- pass --workflow-id to the CO2 importer"
+        }
     }
 
     @Override
     void onFlowComplete() {
-        if( client == null )
+        // Nextflow calls onFlowComplete twice on a hard task failure (error path + shutdown)
+        if( client == null || finalized )
             return
+        finalized = true
         final payload = workflowPayload()
         final meta = session.workflowMetadata
         payload.duration = meta?.duration != null ? meta.duration.toMillis() / 1000d : null
         payload.final_state = meta?.success ? 'COMPLETED' : 'FAILED'
         client.post('/workflows/', payload)
+        writeRunMarker()
         log.info "[nf-gwrepo] workflow ${workflowId} finalized (${payload.final_state})"
         client.shutdown(30)
     }
@@ -110,9 +156,14 @@ class GwRepoObserver implements TraceObserverV2 {
             return
         }
         final task = event.handler.task
+        final processId = "${workflowId}_${task.hash}".toString()
+
+        final taskId = str(trace.get('task_id'))
+        if( taskId != null )
+            taskProcessIds.put(taskId, processId)
 
         client.post('/processes/', [
-            id                   : "${workflowId}_${task.hash}".toString(),
+            id                   : processId,
             workflow_execution_id: workflowId,
             institute_id         : config.institute,
             process_name         : str(trace.get('process')) ?: task.processor?.name,
@@ -140,6 +191,62 @@ class GwRepoObserver implements TraceObserverV2 {
             peak_vmem_mb         : bytes2mb(trace.get('peak_vmem')),
             data_size_tag        : config.dataSizeTag,
         ])
+
+        submitFileProvenance(processId, task)
+    }
+
+    // ---------------------------------------------------------------- provenance
+
+    /** Queue SHA-256 hashing + POST of this task's input and output files. */
+    private void submitFileProvenance(String processId, TaskRun task) {
+        final inputs = new LinkedHashSet<Path>(task.inputFilesMap.values())
+        final outputs = new LinkedHashSet<Path>(collectOutputs(task))
+        if( inputs.isEmpty() && outputs.isEmpty() )
+            return
+        client.submit({ ->
+            for( Path p : inputs )
+                client.post('/input_files/', fileRow(processId, p))
+            for( Path p : outputs )
+                client.post('/output_files/', fileRow(processId, p))
+        } as Runnable)
+    }
+
+    private static Map fileRow(String processId, Path path) {
+        [process_execution_id: processId, filename: path.toString(), sha256: sha256(path)]
+    }
+
+    private static List<Path> collectOutputs(TaskRun task) {
+        final result = new ArrayList<Path>()
+        for( Object v : task.getOutputsByType(FileOutParam).values() ) {
+            if( v instanceof Path )
+                result.add((Path) v)
+            else if( v instanceof Collection )
+                for( Object item : (Collection) v )
+                    if( item instanceof Path )
+                        result.add((Path) item)
+        }
+        return result
+    }
+
+    private static String sha256(Path path) {
+        try {
+            if( !Files.isRegularFile(path) ) {
+                log.warn "[nf-gwrepo] not a regular file, cannot hash: ${path}"
+                return null
+            }
+            final md = MessageDigest.getInstance('SHA-256')
+            final buf = new byte[8192]
+            Files.newInputStream(path).withCloseable { InputStream is ->
+                int n
+                while( (n = is.read(buf)) != -1 )
+                    md.update(buf, 0, n)
+            }
+            return md.digest().encodeHex().toString()
+        }
+        catch( Exception e ) {
+            log.warn "[nf-gwrepo] could not hash ${path}: ${e.message}"
+            return null
+        }
     }
 
     // ------------------------------------------------------------- conversions

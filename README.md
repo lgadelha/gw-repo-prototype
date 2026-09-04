@@ -12,20 +12,14 @@ docker compose up -d
 ## Architecture
 
 ```
-[ Nextflow Pipeline Execution ]
-       │
-       ├─────────────────────────┬─────────────────────────┬
-       ▼                         ▼                         ▼                       
-┌──────────────┐         ┌──────────────┐         ┌──────────────┐   
-│     work     │         │   bco.json   │         │  trace.txt   │ 
-│  directory   │         │  (optional)  │         │  (required)  │ 
-└──────────────┘         └──────────────┘         └──────────────┘   
-       │                         │                         │
-       └─────────────────────────┴────────────┬────────────┘
-                                              ▼
-                                 [ ETL Script and API Client ]
-                                              │
-                                              ▼ (HTTP POST / Bearer Token)
+┌──────────────────────────────────────────────┐
+│           Nextflow Pipeline Execution         │
+│   ┌──────────────────────────────────────┐    │
+│   │   nf-gwrepo plugin (TraceObserverV2)  │    │
+│   └──────────────────────────────────────┘    │
+└───────────────────────┬──────────────────────┘
+                        │  live, as the run proceeds
+                        ▼  (HTTP POST / Bearer Token)
 ┌────────────────────────────────────────────────────────────────┐
 │                      Centralized Service                       │
 │                                                                │
@@ -47,10 +41,10 @@ docker compose up -d
 └────────────────────────────────────────────────────────────────┘
 ```
 
-**Data Sources:**
-- **work directory** - Disk usage, I/O bytes (via `--work-dir` scan)
-- **bco.json** - Provenance data, input/output files (optional)
-- **trace.txt** - Process metrics: CPU, memory, duration, I/O (required)
+**Data source:**
+- **`nf-gwrepo` plugin** - a Nextflow `TraceObserverV2` that streams workflow metadata,
+  per-task resource metrics (CPU, memory, duration, I/O) and input/output file provenance
+  (with SHA-256 checksums) to the API as the pipeline runs — no post-hoc log/trace/BCO parsing.
 
 **Components:**
 - **GW RePO API** - FastAPI backend (port 80)
@@ -65,53 +59,75 @@ docker compose up -d
 
 ## Submit Workflow Data
 
-### 1. Configure Nextflow
+Workflow data is collected by the [`nf-gwrepo`](plugin/nf-gwrepo/) Nextflow plugin,
+which streams it to the API as a pipeline runs.
 
-Add to `nextflow.config`:
+### 1. Install the plugin
+
+```bash
+cd plugin/nf-gwrepo
+make install        # builds and installs into ~/.nextflow/plugins
+```
+
+### 2. Configure Nextflow
+
+Add to your pipeline's `nextflow.config`:
 
 ```groovy
-trace {
-    enabled = true
-    fields = 'hash,process,name,status,duration,cpus,time,disk,memory,realtime,%cpu,%mem,peak_rss,peak_vmem,rchar,wchar'
+plugins {
+    id 'nf-gwrepo'
+}
+
+gwrepo {
+    endpoint    = 'http://localhost:80'   // GW-RePO API base URL
+    apiKey      = secrets.GWREPO_API_KEY  // or the GWREPO_API_KEY env var
+    institute   = 'DKFZ'
+    dataSizeTag = 'mixed'                 // small | medium | large | mixed
 }
 ```
 
-### 2. Run Client
+Then run the pipeline as usual:
 
 ```bash
-export API_KEY=<your-key-from-.env>
-python client/client.py <pipeline_info_dir> --work-dir <work_dir>
+export GWREPO_API_KEY=<your API_KEY from .env>
+nextflow run <pipeline>
 ```
 
-### 3. What Gets Extracted
+### 3. What Gets Collected
 
-**From execution trace (`execution_trace_*.txt`):**
-- `process_name` - Full process identifier
-- `duration` - Actual runtime (seconds)
-- `cpus_requested` - Requested CPU cores
-- `memory_requested` - Requested memory
-- `time_requested` - Requested time limit
-- `disk_requested` - Requested disk space
-- `percent_cpu` - Actual CPU utilization (%)
-- `percent_memory` - Actual memory utilization (%)
-- `peak_rss` - Peak resident memory (MB)
-- `peak_vmem` - Peak virtual memory (MB)
-- `rchar` - Characters read (bytes)
-- `wchar` - Characters written (bytes)
-- `realtime` - Wall clock time
+**Workflow** (`onFlowCreate` / `onFlowComplete`): run name, Nextflow version, revision,
+start time, duration, final state.
 
-**From work directory scanning (`--work-dir`):**
-- `disk_usage_mb` - Total disk space used by task (MB)
-- `read_bytes` - Bytes read from disk during execution
-- `write_bytes` - Bytes written to disk during execution
-- `peak_vmem_mb` - Peak virtual memory from procfs (MB)
-- `peak_rss_mb` - Peak resident memory from procfs (MB)
+**Per task** (`onTaskComplete` / `onTaskCached`): process name, module, container, exit
+status, requested vs. actual CPU / memory / time / disk, `%cpu`, `%mem`, `peak_rss`,
+`peak_vmem`, `rchar` / `wchar`, `read_bytes` / `write_bytes`, realtime, queue.
 
-**From BCO provenance (`manifest_*.bco.json`):** *(optional)*
-- Input file paths and hashes
-- Output file paths and hashes
-- Parameter inputs
-- Workflow structure
+**File provenance:** input and output file paths, each with a SHA-256 of its content.
+
+See [`plugin/nf-gwrepo/README.md`](plugin/nf-gwrepo/README.md) for details.
+
+### 4. CO2 footprint (optional)
+
+CO2 and energy data comes from the [`nf-co2footprint`](https://nextflow-io.github.io/nf-co2footprint/)
+plugin, imported after the run by a small script (`nf-co2footprint` writes its files
+during Nextflow shutdown, too late for `nf-gwrepo` to read them live):
+
+```groovy
+plugins {
+    id 'nf-gwrepo'
+    id 'nf-co2footprint'
+}
+co2footprint {
+    location = 'DE'
+    summary { enabled = true }   // needed for the car-km / tree-sequestration figures
+}
+```
+
+```bash
+nextflow run <pipeline> && python co2-import/submit_co2.py
+```
+
+See [`co2-import/README.md`](co2-import/README.md).
 
 **Privacy:** File paths are stored for provenance only. ML models use numerical metrics only.
 

@@ -29,11 +29,12 @@ import groovy.transform.CompileStatic
 import groovy.util.logging.Slf4j
 
 /**
- * Fire-and-forget HTTP POST channel to the GW-RePO API.
+ * Fire-and-forget channel to the GW-RePO API.
  *
- * POSTs are queued and sent from a single background thread so the workflow's
- * task-completion path never blocks on network I/O (nf-lineage's synchronous
- * store writes are the anti-pattern this avoids).
+ * Work (POSTs, and the file hashing that precedes provenance POSTs) is queued and
+ * run on a single background thread so the workflow's task-completion path never
+ * blocks on network or disk I/O (nf-lineage's synchronous store writes are the
+ * anti-pattern this avoids).
  */
 @Slf4j
 @CompileStatic
@@ -41,19 +42,22 @@ class GwRepoClient {
 
     private static final int QUEUE_CAPACITY = 10_000
     private static final int MAX_RETRIES = 3
+    /** After this many consecutive give-ups (each already {@code MAX_RETRIES} failed
+     *  attempts) the API is treated as down for the rest of the run: further sends are
+     *  dropped without an HTTP attempt. Keeps a misconfigured / unreachable endpoint
+     *  from adding minutes of retry backoff to a run. */
+    private static final int CIRCUIT_THRESHOLD = 3
 
     private final String endpoint
     private final String apiKey
     private final HttpClient http
-    private final BlockingQueue<Post> queue = new ArrayBlockingQueue<Post>(QUEUE_CAPACITY)
+    private final BlockingQueue<Runnable> queue = new ArrayBlockingQueue<Runnable>(QUEUE_CAPACITY)
     private final Thread worker
     private volatile boolean running = true
 
-    private static class Post {
-        final String path
-        final String body
-        Post(String path, String body) { this.path = path; this.body = body }
-    }
+    /** consecutive failed sends; touched only by the worker thread */
+    private int consecutiveFailures = 0
+    private boolean circuitOpen = false
 
     GwRepoClient(String endpoint, String apiKey) {
         this.endpoint = endpoint?.replaceAll('/+$', '') ?: ''
@@ -70,24 +74,40 @@ class GwRepoClient {
     /** Queue a POST. Returns immediately; drops it (with a warning) if the queue is full. */
     void post(String path, Map payload) {
         final body = JsonOutput.toJson(payload.findAll { it.value != null })
-        if( !queue.offer(new Post(path, body)) )
-            log.warn "[nf-gwrepo] HTTP queue full -- dropping POST ${path}"
+        submit({ -> send(path, body) } as Runnable)
+    }
+
+    /** Queue arbitrary work (e.g. hash files, then {@link #post}) onto the background thread. */
+    void submit(Runnable job) {
+        if( !queue.offer(job) )
+            log.warn "[nf-gwrepo] work queue full -- dropping a task"
     }
 
     private void run() {
         while( running || !queue.isEmpty() ) {
-            final task = queue.poll(500, TimeUnit.MILLISECONDS)
-            if( task != null )
-                send(task)
+            final job = queue.poll(500, TimeUnit.MILLISECONDS)
+            if( job == null )
+                continue
+            try {
+                job.run()
+            }
+            catch( Exception e ) {
+                log.warn "[nf-gwrepo] queued job failed: ${e.message}"
+            }
         }
     }
 
-    private void send(Post task) {
-        final req = HttpRequest.newBuilder(URI.create(endpoint + task.path))
+    private void send(String path, String body) {
+        if( circuitOpen ) {
+            log.debug "[nf-gwrepo] POST ${path} dropped -- API marked unreachable"
+            return
+        }
+
+        final req = HttpRequest.newBuilder(URI.create(endpoint + path))
             .timeout(Duration.ofSeconds(30))
             .header('Content-Type', 'application/json')
             .header('Authorization', "Bearer ${apiKey}")
-            .POST(HttpRequest.BodyPublishers.ofString(task.body))
+            .POST(HttpRequest.BodyPublishers.ofString(body))
             .build()
 
         for( int attempt = 1; attempt <= MAX_RETRIES; attempt++ ) {
@@ -95,22 +115,29 @@ class GwRepoClient {
                 final resp = http.send(req, HttpResponse.BodyHandlers.ofString())
                 final code = resp.statusCode()
                 if( code < 300 ) {
-                    log.debug "[nf-gwrepo] POST ${task.path} -> ${code}"
+                    log.debug "[nf-gwrepo] POST ${path} -> ${code}"
+                    consecutiveFailures = 0
                     return
                 }
                 if( code < 500 ) {
-                    log.warn "[nf-gwrepo] POST ${task.path} -> ${code} ${resp.body()} (not retrying)"
+                    log.warn "[nf-gwrepo] POST ${path} -> ${code} ${resp.body()} (not retrying)"
+                    consecutiveFailures = 0
                     return
                 }
-                log.warn "[nf-gwrepo] POST ${task.path} -> ${code} (attempt ${attempt}/${MAX_RETRIES})"
+                log.warn "[nf-gwrepo] POST ${path} -> ${code} (attempt ${attempt}/${MAX_RETRIES})"
             }
             catch( Exception e ) {
-                log.warn "[nf-gwrepo] POST ${task.path} failed: ${e.message} (attempt ${attempt}/${MAX_RETRIES})"
+                final msg = e.message ?: e.class.simpleName
+                log.warn "[nf-gwrepo] POST ${path} failed: ${msg} (attempt ${attempt}/${MAX_RETRIES})"
             }
             if( attempt < MAX_RETRIES )
                 sleepBackoff(attempt)
         }
-        log.error "[nf-gwrepo] POST ${task.path} gave up after ${MAX_RETRIES} attempts"
+        log.error "[nf-gwrepo] POST ${path} gave up after ${MAX_RETRIES} attempts"
+        if( ++consecutiveFailures >= CIRCUIT_THRESHOLD ) {
+            circuitOpen = true
+            log.warn "[nf-gwrepo] ${consecutiveFailures} POSTs failed in a row -- treating the API as down, dropping the rest of this run's data"
+        }
     }
 
     private static void sleepBackoff(int attempt) {

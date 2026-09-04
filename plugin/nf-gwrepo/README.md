@@ -4,15 +4,19 @@ Nextflow plugin that streams provenance and resource-usage data to a
 [GW-RePO](../../README.md) API **as a pipeline runs**, replacing the post-hoc
 `client.py` trace/BCO parsing.
 
-Status: **Step 2** — workflow + per-task resource metrics are streamed to the API.
-`onFlowCreate` registers the institute and a `WorkflowExecution` stub, `onTaskComplete`
-/ `onTaskCached` POST one `ProcessExecution` row per task, `onFlowComplete` re-POSTs the
-workflow with `duration` / `final_state`. Provenance (input/output file checksums) is
-Step 3. See [`../../PLAN.md`](../../PLAN.md) and
-[`../../doc/step0-lineage-field-mapping.md`](../../doc/step0-lineage-field-mapping.md).
+Status: **Step 5** — workflow, per-task resource metrics *and* file provenance are
+streamed to the API. `onFlowCreate` registers the institute and a `WorkflowExecution`
+stub; `onTaskComplete` / `onTaskCached` POST one `ProcessExecution` row per task plus
+`ProcessExecutionInputFile` / `ProcessExecutionOutputFile` rows, each carrying a SHA-256
+of the file's content; `onFlowComplete` re-POSTs the workflow with `duration` /
+`final_state`. `onFlowCreate` / `onFlowComplete` also write `<launchDir>/.gwrepo-run.json`
+(workflow id, endpoint, `task_id → process_execution_id` map) for the post-run CO2
+importer at [`../../co2-import/`](../../co2-import/). See [`../../PLAN.md`](../../PLAN.md)
+and [`../../doc/step0-lineage-field-mapping.md`](../../doc/step0-lineage-field-mapping.md).
 
-POSTs go through a single background thread (`GwRepoClient`) with a bounded queue and
-retry/backoff, so the task-completion path never blocks on the network.
+Work — POSTs, and the file hashing that precedes provenance POSTs — runs on a single
+background thread (`GwRepoClient`) with a bounded queue and retry/backoff, so the
+task-completion path never blocks on network or disk I/O.
 
 ## Layout
 

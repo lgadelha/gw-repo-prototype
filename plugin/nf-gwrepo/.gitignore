@@ -9,3 +9,7 @@ build
 work
 results
 pipeline_info
+
+# nf-gwrepo run artifacts (from local test runs)
+.gwrepo-run.json
+co2footprint_*
