@@ -163,6 +163,20 @@ def extract_process_features(session: Session) -> pd.DataFrame:
     df['time_per_gb'] = df['duration'] / (df['disk_usage_mb'] / 1000 + 0.001)
     df['cpu_per_gb'] = df['percent_cpu'] / (df['disk_usage_mb'] / 1000 + 0.001)
     
+    # ==================== NEW: Enhanced Features for CPU Scaling ====================
+    
+    # 1. Log-scaled data size (captures diminishing returns in resource usage)
+    df['log_disk_gb'] = np.log1p(df['disk_usage_mb'] / 1000)  # ln(1 + disk_gb)
+    
+    # 2. CPU-Data interaction (explicit scaling relationship)
+    df['disk_cpu_interaction'] = (df['disk_usage_mb'] / 1000) * (df['percent_cpu'] / 100 + 0.001)
+    
+    # 3. I/O per CPU (captures I/O-bound vs CPU-bound processes)
+    df['io_per_cpu'] = df['io_total'] / (df['percent_cpu'] / 100 + 1)
+    
+    # 4. Memory-CPU ratio (resource balance - identifies memory-bound vs CPU-bound)
+    df['memory_cpu_ratio'] = df['memory_per_gb'] / (df['cpu_per_gb'] / 100 + 0.001)
+    
     return df
 
 
@@ -204,6 +218,12 @@ def prepare_training_data(df: pd.DataFrame, target: str = 'target_memory_mb') ->
         'memory_per_gb',
         'time_per_gb',
         'cpu_per_gb',
+        
+        # NEW: Enhanced features for better CPU scaling
+        'log_disk_gb',              # Log-scaled data size
+        'disk_cpu_interaction',     # CPU-data size scaling
+        'io_per_cpu',               # I/O pressure per core
+        'memory_cpu_ratio',         # Resource balance
     ]
     
     # Filter to rows with valid target

@@ -534,7 +534,7 @@ def train_ml_models(
     try:
         try:
             from ml.features import extract_process_features, get_feature_statistics
-            from ml.models import ResourcePredictor
+            from ml.bayesian_predictor import BayesianResourcePredictor
             from nfcore_modules import normalize_module_name
         except ImportError as e:
             return {
@@ -543,7 +543,7 @@ def train_ml_models(
                 "message": "ML module not properly installed"
             }
         
-        print(f"Training per-process ML models{'for institute ' + institute_id if institute_id else 'for all institutes'}...")
+        print(f"Training Bayesian per-process models{'for institute ' + institute_id if institute_id else 'for all institutes'}...")
         
         # Extract features from database
         df = extract_process_features(session)
@@ -557,15 +557,15 @@ def train_ml_models(
         
         print(f"Extracted {len(df)} process records for training")
         
-        # Normalize module names using nf-core cache
+        # Normalize module names using nf-core cache (EXISTING BEHAVIOR - UNCHANGED)
         print("Normalizing module names...")
         df['module_name'] = df['process_name'].apply(normalize_module_name)
         
         # Get feature statistics
         stats = get_feature_statistics(df)
         
-        # Train per-process models
-        predictor = ResourcePredictor()
+        # Train Bayesian per-process models
+        predictor = BayesianResourcePredictor()
         training_results = predictor.train_all_process_models(df, institute_id)
         
         # Clear old model metadata
@@ -573,47 +573,39 @@ def train_ml_models(
         for model in existing_models:
             session.delete(model)
         
-        # Register per-process models in database
+        # Register per-process Bayesian models in database
         for process_name, process_results in training_results.get('per_process', {}).items():
             if process_results.get('status') == 'trained':
-                for resource_type, metrics in process_results.get('models', {}).items():
-                    if metrics.get('success', False):
-                        model_meta = Mlmodelmetadata(
-                            process_name=process_name,
-                            resource_type=resource_type,
-                            model_type="gradient_boosting",
-                            training_samples=metrics.get('training_samples', 0),
-                            accuracy_metrics=json.dumps({
-                                'test_r2': float(metrics.get('test_r2', 0)),
-                                'test_rmse': float(metrics.get('test_rmse', 0)),
-                                'test_mae': float(metrics.get('test_mae', 0)),
-                                'cv_r2_mean': float(metrics.get('cv_r2_mean', 0)),
-                                'feature_importance': metrics.get('feature_importance', {}),
-                            }),
-                            model_artifact_path=f"/code/models/{process_name}_{resource_type}.pkl",
-                            is_fallback_model=False
-                        )
-                        session.add(model_meta)
+                for resource_type in ['memory', 'time', 'cpu']:
+                    model_meta = Mlmodelmetadata(
+                        process_name=process_name,
+                        resource_type=resource_type,
+                        model_type="bayesian_ridge",
+                        training_samples=process_results.get('samples', 0),
+                        accuracy_metrics=json.dumps({
+                            'model_type': 'BayesianRidge',
+                            'n_samples': process_results.get('samples', 0),
+                        }),
+                        model_artifact_path=f"/code/models/{process_name}_{resource_type}_bayesian.pkl",
+                        is_fallback_model=False
+                    )
+                    session.add(model_meta)
         
         # Register fallback models
-        for resource_type, metrics in training_results.get('fallback', {}).items():
-            if metrics.get('success', False):
-                model_meta = Mlmodelmetadata(
-                    process_name="_FALLBACK",
-                    resource_type=resource_type,
-                    model_type="gradient_boosting",
-                    training_samples=metrics.get('training_samples', 0),
-                    accuracy_metrics=json.dumps({
-                        'test_r2': float(metrics.get('test_r2', 0)),
-                        'test_rmse': float(metrics.get('test_rmse', 0)),
-                        'test_mae': float(metrics.get('test_mae', 0)),
-                        'cv_r2_mean': float(metrics.get('cv_r2_mean', 0)),
-                        'feature_importance': metrics.get('feature_importance', {}),
-                    }),
-                    model_artifact_path=f"/code/models/_fallback_{resource_type}.pkl",
-                    is_fallback_model=True
-                )
-                session.add(model_meta)
+        for resource_type in ['memory', 'time', 'cpu']:
+            model_meta = Mlmodelmetadata(
+                process_name="_FALLBACK",
+                resource_type=resource_type,
+                model_type="bayesian_ridge",
+                training_samples=0,
+                accuracy_metrics=json.dumps({
+                    'model_type': 'BayesianRidge',
+                    'note': 'Fallback for processes with <10 samples'
+                }),
+                model_artifact_path=f"/code/models/_fallback_{resource_type}_bayesian.pkl",
+                is_fallback_model=True
+            )
+            session.add(model_meta)
         
         session.commit()
         
@@ -638,24 +630,16 @@ def train_ml_models(
                 sample_processes.append({
                     'name': name,
                     'samples': result.get('samples', 0),
-                    'models': list(result.get('models', {}).keys())
+                    'models': result.get('models', [])  # Already a list from Bayesian predictor
                 })
         
         return {
             "success": True,
-            "message": f"Trained {trained_count} per-process models, {fallback_count} using fallback",
+            "message": f"Trained {trained_count} Bayesian models, {fallback_count} processes need more data",
             "training_samples": len(df),
             "summary": summary_response,
             "sample_processes": sample_processes,
-            "fallback_models": {
-                k: {
-                    'test_r2': v.get('test_r2', 0),
-                    'test_rmse': v.get('test_rmse', 0),
-                    'training_samples': v.get('training_samples', 0)
-                }
-                for k, v in training_results.get('fallback', {}).items()
-                if v.get('success')
-            }
+            "model_type": "BayesianRidge"
         }
         
     except Exception as e:
@@ -684,10 +668,10 @@ def retrain_ml_models(
     """
     try:
         from ml.features import extract_process_features, get_feature_statistics
-        from ml.models import ResourcePredictor
+        from ml.bayesian_predictor import BayesianResourcePredictor
         from nfcore_modules import normalize_module_name
         
-        print(f"Retraining per-process ML models...")
+        print(f"Retraining per-process Bayesian models...")
         
         # Extract features from database
         df = extract_process_features(session)
@@ -707,8 +691,8 @@ def retrain_ml_models(
         # Get feature statistics
         stats = get_feature_statistics(df)
         
-        # Train per-process models
-        predictor = ResourcePredictor()
+        # Train per-process Bayesian models
+        predictor = BayesianResourcePredictor()
         training_results = predictor.train_all_process_models(df, institute_id)
         
         # Clear existing model metadata
@@ -716,43 +700,28 @@ def retrain_ml_models(
         for model in existing_models:
             session.delete(model)
         
-        # Register per-process models
+        # Register per-process Bayesian models
         for process_name, process_results in training_results.get('per_process', {}).items():
             if process_results.get('status') == 'trained':
-                for resource_type, metrics in process_results.get('models', {}).items():
-                    if metrics.get('success', False):
-                        model_meta = Mlmodelmetadata(
-                            process_name=process_name,
-                            resource_type=resource_type,
-                            model_type="gradient_boosting",
-                            training_samples=metrics.get('training_samples', 0),
-                            accuracy_metrics=json.dumps({
-                                'test_r2': float(metrics.get('test_r2', 0)),
-                                'test_rmse': float(metrics.get('test_rmse', 0)),
-                                'cv_r2_mean': float(metrics.get('cv_r2_mean', 0)),
-                            }),
-                            model_artifact_path=f"/code/models/{process_name}_{resource_type}.pkl",
-                            is_fallback_model=False
-                        )
-                        session.add(model_meta)
+                for resource_type in ['memory', 'time', 'cpu']:
+                    model_meta = Mlmodelmetadata(
+                        process_name=process_name,
+                        resource_type=resource_type,
+                        model_type="bayesian_ridge",
+                        training_samples=process_results.get('samples', 0),
+                        accuracy_metrics=json.dumps({
+                            'model_type': 'BayesianRidge',
+                            'n_samples': process_results.get('samples', 0),
+                        }),
+                        model_artifact_path=f"/code/models/{process_name}_{resource_type}_bayesian.pkl",
+                        is_fallback_model=False
+                    )
+                    session.add(model_meta)
         
-        # Register fallback models
-        for resource_type, metrics in training_results.get('fallback', {}).items():
-            if metrics.get('success', False):
-                model_meta = Mlmodelmetadata(
-                    process_name="_FALLBACK",
-                    resource_type=resource_type,
-                    model_type="gradient_boosting",
-                    training_samples=metrics.get('training_samples', 0),
-                    accuracy_metrics=json.dumps({
-                        'test_r2': float(metrics.get('test_r2', 0)),
-                        'test_rmse': float(metrics.get('test_rmse', 0)),
-                        'cv_r2_mean': float(metrics.get('cv_r2_mean', 0)),
-                    }),
-                    model_artifact_path=f"/code/models/_fallback_{resource_type}.pkl",
-                    is_fallback_model=True
-                )
-                session.add(model_meta)
+        # Register fallback models (Bayesian models don't use fallback - each process is independent)
+        # Note: Bayesian models handle low-sample cases with strong priors instead of fallback
+        
+        session.commit()
         
         session.commit()
         
@@ -929,25 +898,15 @@ def predict_resources(
         institute_id: Optional institute ID to filter historical data
     """
     try:
-        # Load trained ML models
+        # Load trained Bayesian models
         try:
-            from ml.models import ResourcePredictor
+            from ml.bayesian_predictor import BayesianResourcePredictor
+            from ml.features import extract_process_features
         except ImportError as e:
             return {
                 "success": False,
                 "error": f"Import error: {str(e)}",
-                "message": "ML module not properly installed"
-            }
-        
-        predictor = ResourcePredictor()
-        predictor.load_models()
-        
-        # Check if models are loaded
-        if not any(predictor.models.values()):
-            return {
-                "success": False,
-                "error": "No trained models available",
-                "message": "Train models first using POST /ml/train"
+                "message": "Bayesian ML module not properly installed"
             }
         
         import numpy as np
@@ -1161,11 +1120,10 @@ def get_optimization_recommendations(
             p.peak_rss, p.peak_vmem, p.duration, p.cpus_requested,
             p.percent_cpu, p.percent_memory, p.time_requested, p.memory_requested,
             c.energy_consumption_mwh, c.co2e_mg,
-            p.process_name
+            p.process_name, p.disk_usage_mb, p.module_name
         FROM processexecution p
         LEFT JOIN co2footprint c ON p.id = c.process_execution_id
-        WHERE UPPER(SPLIT_PART(p.process_name, ' (', 1)) LIKE UPPER(:process_name)
-           OR UPPER(SPLIT_PART(p.process_name, ':', -1)) LIKE UPPER(:process_name)
+        WHERE UPPER(p.module_name) LIKE UPPER(:process_name)
         """
         
         if institute_id:
@@ -1209,6 +1167,8 @@ def get_optimization_recommendations(
         # Calculate stats first
         mem_stats = calc_stats([r['peak_rss'] for r in historical_data])
         dur_stats = calc_stats([r['duration'] for r in historical_data])
+        disk_values = [r['disk_usage_mb'] for r in historical_data if r.get('disk_usage_mb')]
+        disk_stats = calc_stats(disk_values)
         
         # Calculate average CPUs from historical data
         # Strategy: Trust explicit cpus_requested, only cap uncertain estimates
@@ -1245,6 +1205,7 @@ def get_optimization_recommendations(
             "historical_samples": len(historical_data),
             "memory": mem_stats,
             "duration": dur_stats,
+            "disk": disk_stats,
             "cpu_utilization": calc_stats([r['percent_cpu'] for r in historical_data]),
             "energy": calc_stats([r['energy_consumption_mwh'] for r in historical_data if r.get('energy_consumption_mwh')]),
             "co2": calc_stats([r['co2e_mg'] for r in historical_data if r.get('co2e_mg')]),
@@ -1252,6 +1213,10 @@ def get_optimization_recommendations(
                 "memory": format_memory(mem_stats['p95']) if mem_stats else "256 MB",
                 "time": round_time(dur_stats['p95']) if dur_stats else "1m",
                 "cpus": recommended_cpus
+            },
+            "historical_size_range_gb": {
+                'min': disk_stats['min'] / 1000 if disk_stats and disk_stats.get('min') else 0,
+                'max': disk_stats['max'] / 1000 if disk_stats and disk_stats.get('max') else 0
             }
         }
         
@@ -1299,22 +1264,22 @@ def get_all_optimizations(
     USES TRAINED ML MODELS to predict resources for small, medium, and large dataset sizes.
     """
     try:
-        # Load trained ML models
+        # Load trained Bayesian models
         try:
-            from ml.models import ResourcePredictor
+            from ml.bayesian_predictor import BayesianResourcePredictor
             from nfcore_modules import normalize_module_name, get_nfcore_modules
         except ImportError as e:
             return {
                 "success": False,
                 "error": f"Import error: {str(e)}",
-                "message": "ML module not properly installed"
+                "message": "Bayesian ML module not properly installed"
             }
         
         # Load nf-core module cache
         nfcore_cache = get_nfcore_modules()
         
-        predictor = ResourcePredictor()
-        # Models are loaded on-demand, no need to pre-check
+        predictor = BayesianResourcePredictor()
+        # Bayesian models are loaded on-demand per process
         
         import numpy as np
         
@@ -1451,32 +1416,20 @@ def get_all_optimizations(
                     'cpu_per_gb': (safe_mean([r.get('percent_cpu') for r in rows]) / 100.0 / max(median_disk / 1000, 0.001)) * scale_factor,
                 }
                 
-                # Get ML predictions for this scenario using per-process model
-                memory_pred = predictor.predict_for_process(module_name, scenario_features, 'memory')
-                time_pred = predictor.predict_for_process(module_name, scenario_features, 'time')
-                cpu_pred = predictor.predict_for_process(module_name, scenario_features, 'cpu')
-                
-                # Track if fallback model was used
-                is_fallback = memory_pred.get('is_fallback_model', False)
-                
-                # Extract predictions with safety margins
-                if memory_pred.get('success'):
-                    memory_mb = memory_pred.get('prediction_with_safety', memory_pred['prediction'] * 1.2)
-                else:
-                    memory_mb = 256.0  # Fallback
-                    is_fallback = True
-                
-                if time_pred.get('success'):
-                    time_sec = time_pred.get('prediction_with_safety', time_pred['prediction'] * 1.3)
-                    time_sec = max(3600, time_sec)  # Minimum 1 hour
-                else:
-                    time_sec = 7200  # Fallback 2 hours
-                    is_fallback = True
-                
-                if cpu_pred.get('success'):
-                    cpu_value = max(1, min(32, int(round(cpu_pred['prediction']))))
-                else:
-                    cpu_value = 2  # Fallback
+                # Get Bayesian predictions for this scenario
+                try:
+                    bayesian_predictions = predictor.predict(module_name, scenario_features)
+                    
+                    # Extract predictions with safety margins
+                    memory_mb = bayesian_predictions['memory']['final_with_safety']
+                    time_sec = max(3600, bayesian_predictions['time']['final_with_safety'])  # Minimum 1 hour
+                    cpu_value = max(1, round(bayesian_predictions['cpu']['final_with_safety']))
+                    is_fallback = False
+                except Exception as pred_error:
+                    # Fallback if prediction fails
+                    memory_mb = 256.0
+                    time_sec = 7200
+                    cpu_value = 2
                     is_fallback = True
                 
                 scenarios_response[size_name] = {
@@ -1513,4 +1466,273 @@ def get_all_optimizations(
             "success": False,
             "error": str(e),
             "optimizations": []
+        }
+
+
+class ResourceLimits(SQLModel):
+    """Resource limits for workflow tasks."""
+    max_cpus: int = 32
+    max_memory_mb: float = 131072  # 128 GB
+    max_duration_sec: int = 86400  # 24 hours
+
+
+class OptimizeForSizeRequest(SQLModel):
+    """Request model for interactive optimization endpoint."""
+    process_name: str
+    expected_disk_gb: float
+    confidence_level: float = 0.95
+    priority: str = "balanced"
+    resource_limits: Optional[ResourceLimits] = None
+
+
+@app.post("/ml/optimize-for-size")
+def optimize_for_data_size(
+    request: OptimizeForSizeRequest,
+    session: Session = Depends(get_session),
+    api_key: str = Depends(verify_api_key)
+):
+    # Extract from request body
+    process_name = request.process_name
+    expected_disk_gb = request.expected_disk_gb
+    confidence_level = request.confidence_level
+    priority = request.priority
+    """
+    Generate optimized config for user-specified data size.
+    Uses Bayesian models with dynamic safety margins based on uncertainty.
+    
+    Args:
+        process_name: Normalized process name (e.g., "BCFTOOLS_FILTER")
+        expected_disk_gb: User's expected input data size in GB
+        confidence_level: Confidence level for intervals (default 0.95)
+        priority: "balanced", "cost", or "performance"
+    """
+    try:
+        from ml.bayesian_predictor import BayesianResourcePredictor
+        from ml.features import extract_process_features
+        
+        # Get historical data using existing feature extraction
+        all_features = extract_process_features(session)
+        
+        # Filter for this process
+        df = all_features[all_features['module_name'] == process_name].copy()
+        
+        if df.empty:
+            return {
+                'success': False,
+                'error': f'No historical data found for process: {process_name}'
+            }
+        
+        if len(df) < 10:
+            return {
+                'success': False,
+                'error': f'Insufficient historical data ({len(df)} runs, need ≥10)',
+                'recommendation': 'Run workflow more times or use fallback model'
+            }
+        
+        # Load or train Bayesian model
+        predictor = BayesianResourcePredictor()
+        
+        # Try to load pre-trained models
+        if not predictor.load_model(process_name):
+            # Train on-the-fly
+            predictor.train(process_name, df)
+        
+        # Build feature vector for user's data size
+        historical_avg = {
+            'disk_gb': df['disk_usage_mb'].mean() / 1000,
+            'cpu_utilization': df['cpu_utilization'].mean(),
+            'memory_utilization': df['memory_utilization'].mean(),
+            'io_total': df['io_total'].mean(),
+            'io_ratio': df['io_ratio'].mean(),
+            'cpu_mem_product': df['cpu_mem_product'].mean(),
+            'memory_per_gb': df['memory_per_gb'].mean(),
+            'time_per_gb': df['time_per_gb'].mean(),
+            'cpu_per_gb': df['cpu_per_gb'].mean()
+        }
+        
+        # Scale features proportionally to user's data size
+        scaling_factor = expected_disk_gb / historical_avg['disk_gb']
+        
+        # Calculate new enhanced features for better CPU scaling
+        import numpy as np
+        log_disk_gb = np.log1p(expected_disk_gb)
+        disk_cpu_interaction = expected_disk_gb * (historical_avg['cpu_utilization'] + 0.001)
+        io_per_cpu = (historical_avg['io_total'] * scaling_factor) / (historical_avg['cpu_utilization'] + 1)
+        memory_cpu_ratio = historical_avg['memory_per_gb'] / (historical_avg['cpu_per_gb'] / 100 + 0.001)
+        
+        features = {
+            'disk_intensity': expected_disk_gb * 1000,  # In MB
+            'cpu_utilization': historical_avg['cpu_utilization'],
+            'memory_utilization': historical_avg['memory_utilization'],
+            'io_total': historical_avg['io_total'] * scaling_factor,
+            'io_ratio': historical_avg['io_ratio'],
+            'cpu_mem_product': historical_avg['cpu_mem_product'],
+            'memory_per_gb': historical_avg['memory_per_gb'],
+            'time_per_gb': historical_avg['time_per_gb'],
+            'cpu_per_gb': historical_avg['cpu_per_gb'],
+            'size_category_encoded': 1.0,  # Medium
+            # New enhanced features
+            'log_disk_gb': log_disk_gb,
+            'disk_cpu_interaction': disk_cpu_interaction,
+            'io_per_cpu': io_per_cpu,
+            'memory_cpu_ratio': memory_cpu_ratio
+        }
+        
+        # Get predictions with uncertainty
+        predictions = predictor.predict(process_name, features)
+        
+        # Check extrapolation warnings
+        warnings = []
+        hist_min_gb = df['disk_usage_mb'].min() / 1000
+        hist_max_gb = df['disk_usage_mb'].max() / 1000
+        
+        # Warning A: Outside historical range
+        if expected_disk_gb < hist_min_gb or expected_disk_gb > hist_max_gb:
+            warnings.append(
+                f"Input size ({expected_disk_gb} GB) is outside historical range "
+                f"({hist_min_gb:.1f} - {hist_max_gb:.1f} GB). Predictions may be less accurate."
+            )
+        
+        # Warning C: High uncertainty
+        for resource_type in ['memory', 'time', 'cpu']:
+            cv = predictions[resource_type]['cv']
+            if cv > 0.3:
+                warnings.append(
+                    f"High uncertainty for {resource_type} prediction (CV={cv:.2f}). "
+                    f"Consider running more historical executions."
+                )
+        
+        # Apply priority-based adjustments
+        if priority == "cost":
+            # Reduce safety margins by 50% (accept higher risk)
+            for k in predictions:
+                original_margin = predictions[k]['safety_margin']
+                predictions[k]['safety_margin'] = original_margin * 0.5
+                predictions[k]['final_with_safety'] = (
+                    predictions[k]['prediction'] * (1 + predictions[k]['safety_margin'])
+                )
+        elif priority == "performance":
+            # Increase safety margins by 20% (conservative)
+            for k in predictions:
+                original_margin = predictions[k]['safety_margin']
+                predictions[k]['safety_margin'] = original_margin * 1.2
+                predictions[k]['final_with_safety'] = (
+                    predictions[k]['prediction'] * (1 + predictions[k]['safety_margin'])
+                )
+        # "balanced" = use Bayesian uncertainty-based margins (no adjustment)
+        
+        # Enforce minimum 1 hour time limit (Nextflow constraint)
+        min_time_sec = 3600  # 1 hour minimum
+        if predictions['time']['final_with_safety'] < min_time_sec:
+            predictions['time']['final_with_safety'] = min_time_sec
+            predictions['time']['enforced_minimum'] = True
+        else:
+            predictions['time']['enforced_minimum'] = False
+        
+        # Apply USER-PROVIDED resource limits as HARD CAPS
+        # These come from the UI input in ML Training tab or Optimizations tab override
+        resource_limits = request.resource_limits
+        
+        # Default limits if not provided (reasonable defaults)
+        if not resource_limits:
+            resource_limits = ResourceLimits(
+                max_cpus=32,
+                max_memory_mb=131072,  # 128 GB
+                max_duration_sec=86400  # 24 hours
+            )
+        
+        # Apply user limits as absolute caps
+        for resource_type in ['cpu', 'memory', 'time']:
+            prediction_value = predictions[resource_type]['final_with_safety']
+            
+            # Get the appropriate limit
+            if resource_type == 'cpu':
+                limit = resource_limits.max_cpus
+            elif resource_type == 'memory':
+                limit = resource_limits.max_memory_mb
+            else:  # time
+                limit = max(min_time_sec, resource_limits.max_duration_sec)  # Respect 1h minimum
+            
+            # Cap at user-provided limit
+            if prediction_value > limit:
+                predictions[resource_type]['final_with_safety'] = float(limit)
+                predictions[resource_type]['capped_by_limit'] = True
+                
+                # Calculate extrapolation factor for warning
+                extrapolation_factor = expected_disk_gb / max(hist_max_gb, 0.001) if hist_max_gb > 0 else 0
+                cv = predictions[resource_type]['cv']
+                
+                warning_reasons = []
+                if extrapolation_factor > 10:
+                    warning_reasons.append(f"{extrapolation_factor:.0f}x beyond historical data")
+                if cv > 1.0:
+                    warning_reasons.append(f"CV={cv:.0%} (high uncertainty)")
+                
+                warning_text = f"{', '.join(warning_reasons)} - prediction capped at user limit" if warning_reasons else "capped at user limit"
+                warnings.append(
+                    f"{resource_type.upper()}: {prediction_value:.0f} → {limit} ({warning_text})"
+                )
+            else:
+                predictions[resource_type]['capped_by_limit'] = False
+        
+        # Format time for Nextflow (1h, 30m, 3600s format)
+        def format_nextflow_time(seconds):
+            if seconds >= 3600:
+                hours = int(seconds // 3600)
+                remaining = seconds % 3600
+                if remaining >= 60:
+                    mins = int(remaining // 60)
+                    return f"{hours}h{mins}m"
+                return f"{hours}h"
+            elif seconds >= 60:
+                mins = int(seconds // 60)
+                return f"{mins}m"
+            else:
+                return f"{int(seconds)}s"
+        
+        time_formatted = format_nextflow_time(predictions['time']['final_with_safety'])
+        
+        # Generate Nextflow config (ensure non-negative values)
+        memory_mb = max(256, predictions['memory']['final_with_safety'])  # Minimum 256 MB
+        nextflow_config = f"""process {{
+    withName: '{process_name}' {{
+        cpus = {max(1, round(predictions['cpu']['final_with_safety']))}
+        memory = {memory_mb:.0f}.MB
+        time = {time_formatted}
+        
+        // Bayesian prediction with uncertainty
+        // Input data size: {expected_disk_gb} GB
+        // Memory: {max(0, predictions['memory']['prediction']):.0f} MB ±{predictions['memory']['uncertainty']:.0f} MB (CV={predictions['memory']['cv']:.0%})
+        // Time: {max(0, predictions['time']['prediction']):.0f} sec ±{predictions['time']['uncertainty']:.0f} sec (CV={predictions['time']['cv']:.0%})
+        // 95% CI Memory: [{max(0, predictions['memory']['confidence_interval']['lower']):.0f}, {predictions['memory']['confidence_interval']['upper']:.0f}] MB
+        // 95% CI Time: [{max(0, predictions['time']['confidence_interval']['lower']):.0f}, {predictions['time']['confidence_interval']['upper']:.0f}] sec
+        // Minimum 1 hour enforced: {'Yes' if predictions['time']['enforced_minimum'] else 'No'} ({time_formatted})
+    }}
+}}
+"""
+        
+        return {
+            'success': True,
+            'process_name': process_name,
+            'input_disk_gb': expected_disk_gb,
+            'confidence_level': confidence_level,
+            'priority': priority,
+            'predictions': predictions,
+            'nextflow_config': nextflow_config,
+            'historical_runs_used': len(df),
+            'historical_size_range_gb': {
+                'min': float(hist_min_gb),
+                'max': float(hist_max_gb)
+            },
+            'warnings': warnings,
+            'model_type': 'BayesianRidge'
+        }
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {
+            'success': False,
+            'error': str(e),
+            'message': 'Optimization failed - check server logs'
         }

@@ -2,20 +2,6 @@
 
 Track Nextflow workflow resource usage and get ML-powered recommendations for local execution.
 
-## Recent Changes
-
-### v0.2.0 (Latest)
-- **Workflow Summaries page**: New default landing page with workflow-level metrics and visualizations
-- **Module name normalization**: Automatic normalization using nf-core cache (e.g., `BCFTOOLS_REHEADER_1` → `BCFTOOLS_REHEADER`)
-- **Improved navigation**: Dropdown-based navigation with Workflow Summaries as default
-- **Per-process ML models**: Each nf-core module gets its own trained model when ≥10 samples available
-
-### Migration
-To normalize existing module names in your database:
-```bash
-python scripts/migrate_normalize_modules.py
-```
-
 ## Quick Start
 
 ```bash
@@ -64,12 +50,13 @@ docker compose up -d
 │                          │ ───────────────── │                      │
 │                          │ 1. Workflow       │                      │
 │                          │    Summaries      │                      │
-│                          │ 2. Dashboard      │                      │
-│                          │ 3. Analytics      │                      │
-│                          │ 4. ML Training    │                      │
-│                          │ 5. Optimizations  │                      │ 
-│                          │ 6. Model          │                      │
-│                          │    Performance    │                      │
+│                          │ 2. Analytics &    │                      │
+│                          │    Dashboard      │                      │
+│                          │ 3. Bayesian       │                      │
+│                          │    Modelling      │                      │
+│                          │   - Training      │                      │
+│                          │   - Optimizations │                      │
+│                          │   - Bulk Opt.     │                      │
 │                          └───────────────────┘                      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -86,16 +73,8 @@ docker compose up -d
 
 - **GW RePO API** *(port 80)* — FastAPI backend with REST endpoints
 - **PostgreSQL Database** *(port 5432)* — Persistent storage for workflows, processes, ML models
-- **ML Resource Models** — Per-process Gradient Boosting predictors (memory, time, CPU)
-- **Streamlit UI App** *(port 8501)* — 6-page analytics dashboard
-
-**Why New Input Channels:**
-
-1. **nextflow.log** → Enables **Workflow Summaries** page  
-   Aggregates metrics at workflow level (wall clock, concurrent processes, status) for executive overview before drilling into process details.
-
-2. **co2footprint_*.txt** → Sustainability tracking  
-   Energy consumption and CO2 emissions per workflow for environmental impact analysis and green computing optimization.
+- **ML Resource Models** — Per-process Bayesian Ridge predictors with uncertainty estimation (memory, time, CPU)
+- **Streamlit UI App** *(port 8501)* — 3-page analytics dashboard
 
 **Runs entirely on your machine:**
 - ✅ Private: All data stays local
@@ -182,7 +161,7 @@ Open http://localhost:8501
 
 ### Dashboard Pages
 
-#### 1. Workflow Summaries (Default)
+#### 1. Workflow Summaries
 
 Overview of workflow-level execution metrics and visualizations
 
@@ -190,30 +169,27 @@ Overview of workflow-level execution metrics and visualizations
 - Workflow execution table with key metrics
 - Visualizations:
   - Workflow status distribution (pie chart)
-  - Wall clock time distribution (histogram)
-  - Memory vs CPU usage (scatter plot)
-  - Concurrent processes distribution (histogram)
+  - Duration distribution (histogram)
+  - Duration over time (line chart)
+  - Data size tag distribution (bar chart)
+  - Duration by data size tag (box plot)
 
 ---
 
-#### 2. Dashboard
+#### 2. Analytics & Dashboard
 
-Enables quick overview of all workflow executions and, find resource-heavy processes
+Combined view for process-level analytics and execution metrics
 
+**Dashboard Tab:**
 - Process resource utilization charts (CPU%, memory%, duration)
 - Filter by process name
 - Historical execution table with all metrics
-- Generate optimized Nextflow config based on historical P95 values
-- Download detailed process data as CSV
+- Summary statistics by process
+- CPU utilization distribution (box plots)
+- Disk I/O & storage metrics
 
----
-
-#### 3. Analytics
-
-Helps to understand resource patterns per process and identification of bottlenecks
-
-- Select process from dropdown
-- Correlation plots:
+**Analytics Tab:**
+- Correlation plots per process:
   - Memory vs Disk Size (with R² correlation)
   - CPU Cores Used vs Disk Size
   - Duration vs Disk Size
@@ -226,65 +202,45 @@ Helps to understand resource patterns per process and identification of bottlene
   - **Compute-Intensive**: I/O intensity < 0.5×
 - Toggle log scale for better visualization
 
-
 ---
 
-#### 4. ML Training
+#### 3. Bayesian Modelling
 
-Train resource prediction models here
+Train Bayesian models and get ML-powered recommendations with uncertainty estimates
 
-- Train Gradient Boosting models on your historical data
-- View model performance metrics:
-  - R² score (variance explained)
-  - RMSE (root mean square error)
-  - MAE (mean absolute error)
-  - Cross-validation scores
-- Feature importance rankings (which features matter most)
-- Model artifacts stored in `/code/models/`
+**Training Tab:**
+- Train Bayesian Ridge models on your historical data
+- Set resource limits (max CPUs, memory, duration per task)
+- View training results:
+  - Processes with trained models
+  - Processes needing more data (<10 samples)
+- Enhanced features for better CPU scaling:
+  - Log-scaled data size
+  - CPU-data interaction terms
+  - I/O per CPU ratio
+  - Memory-CPU balance
 
-**Requirements:** Minimum 10 samples per process for per-process models
+**Optimizations Tab:**
+- Interactive resource optimizer with uncertainty estimates
+- Select process and enter data size with visual ruler
+- See historical range and your position
+- Get predictions with:
+  - 95% confidence intervals
+  - Coefficient of variation (CV) for uncertainty
+  - Dynamic safety margins based on uncertainty
+- Visualize predictions with uncertainty plots
+- Resource limits enforcement (from training tab)
+- Download Nextflow config
 
----
-
-#### 5. ML Predictions
-Get resource recommendations for a specific process before running your new analysis
-- Enter process name (e.g., `BCFTOOLS_FILTER`)
-- Get predictions for SMALL, MEDIUM, LARGE dataset scenarios
-- Predictions include:
-  - Memory (MB) with P95 safety margin
-  - CPU cores with P95 safety margin
-  - Duration (seconds) with P95 safety margin
-- Auto-generated Nextflow config snippet
-- Download ready-to-use config file
-- Shows if prediction uses per-process model or fallback
-
----
-
-#### 6. Optimization
-Get data-driven recommendations for all processes
-
-**Features:**
-- Lists all processes with historical data
-- For each process:
-  - Historical statistics (mean, std, min, max, median, P95, P99)
-  - Recommended configuration (P95-based)
-  - Process insights (CPU-bound, I/O-bound, etc.)
-  - Energy and CO2 analysis (if available)
-  - 3 scenario predictions (SMALL/MEDIUM/LARGE)
-  - `is_fallback_model` flag (true if <10 samples)
-- Filter by institute
-
----
-
-#### 7. Model Performance
-Monitor trained model quality before trusting predictions
-
-- List all trained models (memory, time, CPU per process)
-- Accuracy metrics comparison
-- Feature importance visualizations
-- Training sample counts
-- Model timestamps
-- Delete/retrain individual models
+**Bulk Optimizations Tab:**
+- Generate configs for ALL trained processes at once
+- Choose data size strategy:
+  - Use historical average per process
+  - Use historical maximum per process
+  - Custom size (same for all)
+- Priority modes: balanced, cost, performance
+- Sanity caps prevent absurd predictions
+- Download combined Nextflow config
 
 ---
 
@@ -292,26 +248,34 @@ Monitor trained model quality before trusting predictions
 
 ### Algorithm
 
-**Model:** Gradient Boosting Regressor (sklearn)
+**Model:** Bayesian Ridge Regression (sklearn)
 
-**Why Gradient Boosting:**
-- Handles non-linear relationships (resource usage vs data size)
-- Robust to outliers (some runs are anomalies)
-- Provides feature importance (interpretability)
-- Works well with tabular data (our feature set)
+**Why Bayesian Ridge:**
+- Provides uncertainty estimates (CV, confidence intervals)
+- Handles small datasets with scenario-based priors
+- Dynamic safety margins based on uncertainty
+- Better extrapolation beyond training data
+- Per-process models with automatic regularization
 
 **Training:**
-- 80/20 train/test split
-- 5-fold cross-validation
+- Scenario-based priors:
+  - ≥30 runs: weak priors (data-driven)
+  - 10-30 runs: moderate priors
+  - <10 runs: strong regularization
 - StandardScaler for feature normalization
-- Models saved as `.pkl` files
+- Models saved as `_bayesian.pkl` files
 
 **Prediction:**
-- P95 safety margin (15% buffer for memory/time)
-- Minimum 1 hour for time predictions
-- CPU rounded to nearest core (1-32 range)
+- 95% confidence intervals for all predictions
+- Coefficient of variation (CV) for uncertainty
+- Dynamic safety margins:
+  - CV < 10%: 5% margin (high confidence)
+  - CV 10-20%: 15% margin (medium confidence)
+  - CV > 20%: 30% margin (low confidence)
+- Minimum 1 core for CPU, 256 MB for memory, 1 hour for time
+- User-provided resource limits enforced as hard caps
 
-### Features Used (13 total)
+### Features Used (14 total)
 
 | Feature | Description | Why It Matters |
 |---------|-------------|----------------|
@@ -328,18 +292,37 @@ Monitor trained model quality before trusting predictions
 | `memory_per_gb` | Memory efficiency (MB per GB data) | Normalized memory usage |
 | `time_per_gb` | Time efficiency (sec per GB data) | Normalized runtime |
 | `cpu_per_gb` | CPU efficiency (cores per GB data) | Normalized CPU usage |
+| `log_disk_gb` | Log-scaled data size | Captures diminishing returns |
+| `disk_cpu_interaction` | CPU × data size | Explicit scaling relationship |
+| `io_per_cpu` | I/O per core | I/O pressure per CPU |
+| `memory_cpu_ratio` | Memory/CPU balance | Resource balance indicator |
 
-### Per-Process vs Fallback Models
+### Per-Process Models
 
-**Per-process model:** Trained on ≥10 samples of the same process (e.g., `BCFTOOLS_FILTER`)
-
-**Fallback model:** Used when <10 samples, trained on ALL processes combined
+**Each process gets its own model** trained only on its historical data:
+- Automatically uses normalized process names (e.g., `BCFTOOLS_FILTER`)
+- Aggregates runs from all variants (`_1`, `_2`, etc.)
+- Strong priors for processes with <10 samples prevent overfitting
+- No fallback model needed - Bayesian priors handle low-sample cases
 
 **How it works:**
 ```
-Process has 24 samples? → Use BCFTOOLS_FILTER model ✅
-Process has 3 samples?  → Use fallback model ⚠️
+BCFTOOLS_FILTER has 24 samples? → Train BCFTOOLS_FILTER model ✅
+BCFTOOLS_FILTER has 3 samples?  → Strong priors, still train ✅
 ```
+
+### Resource Limits
+
+**Set workflow-level resource constraints:**
+- Max CPUs per task (default: 32)
+- Max memory per task (default: 128 GB)
+- Max duration per task (default: 24 hours)
+
+**Enforcement:**
+- Applied as hard caps on all predictions
+- Prevents absurd extrapolation (e.g., 816 CPUs, 11 TB memory)
+- Configurable per workflow in ML Training tab
+- Optional override per prediction in Optimizations tab
 
 ## API Endpoints
 
