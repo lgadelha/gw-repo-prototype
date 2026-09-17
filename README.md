@@ -15,16 +15,19 @@ docker compose up -d
 ┌──────────────────────────────────────────────┐
 │           Nextflow Pipeline Execution         │
 │   ┌──────────────────────────────────────┐    │
-│   │   nf-gwrepo plugin (TraceObserverV2)  │    │
+│   │   tower {} — Nextflow's own core      │    │
+│   │   Tower/Seqera-Platform HTTP client   │    │
 │   └──────────────────────────────────────┘    │
 └───────────────────────┬──────────────────────┘
                         │  live, as the run proceeds
-                        ▼  (HTTP POST / Bearer Token)
+                        ▼  (HTTP POST/PUT / Bearer or Basic auth)
 ┌────────────────────────────────────────────────────────────────┐
 │                      Centralized Service                       │
 │                                                                │
 │                     ┌───────────────────┐                      │
 │                     │    GW RePO API    │◄──────┐              │
+│                     │  (incl. tower     │       │              │
+│                     │  emulation routes)│       │              │
 │                     └───────┬───┬───────┘       │              │
 │       (Reads/Writes)        │   │               │ (REST API    │
 │       ┌─────────────────────┘   └───────┐       │  Queries)    │
@@ -39,12 +42,23 @@ docker compose up -d
 │                     │   (User Facing)   │                      │
 │                     └───────────────────┘                      │
 └────────────────────────────────────────────────────────────────┘
+                        ▲
+                        │  post-run (files/records already on disk)
+        lineage-import/submit_lineage.py, co2-import/submit_co2.py
 ```
 
-**Data source:**
-- **`nf-gwrepo` plugin** - a Nextflow `TraceObserverV2` that streams workflow metadata,
-  per-task resource metrics (CPU, memory, duration, I/O) and input/output file provenance
-  (with SHA-256 checksums) to the API as the pipeline runs — no post-hoc log/trace/BCO parsing.
+**Data source:** no custom Nextflow plugin — three things Nextflow already ships,
+each covering one concern, with no overlap:
+- **`tower {}`** (built into Nextflow core) streams workflow metadata and per-task
+  resource metrics (CPU, memory, duration, I/O) to the API live, as the pipeline
+  runs. The API implements the receiving side of Nextflow's own Tower/Seqera
+  Platform protocol — no post-hoc log/trace parsing.
+- **`lineage {}`** (built into Nextflow core, `lineage.enabled = true`) records
+  input/output file paths per task to a local store, read after the run by
+  [`lineage-import`](lineage-import/) to compute and submit a SHA-256 of each
+  file's content (`nf-lineage`'s own checksum is a metadata hash, not content).
+- **`nf-co2footprint`** (optional plugin), read after the run by
+  [`co2-import`](co2-import/) — see below.
 
 **Components:**
 - **GW RePO API** - FastAPI backend (port 80)
@@ -59,62 +73,72 @@ docker compose up -d
 
 ## Submit Workflow Data
 
-Workflow data is collected by the [`nf-gwrepo`](plugin/nf-gwrepo/) Nextflow plugin,
-which streams it to the API as a pipeline runs.
-
-### 1. Install the plugin
-
-```bash
-cd plugin/nf-gwrepo
-make install        # builds and installs into ~/.nextflow/plugins
-```
-
-### 2. Configure Nextflow
-
-Add to your pipeline's `nextflow.config`:
-
-```groovy
-plugins {
-    id 'nf-gwrepo'
-}
-
-gwrepo {
-    endpoint    = 'http://localhost:80'   // GW-RePO API base URL
-    apiKey      = secrets.GWREPO_API_KEY  // or the GWREPO_API_KEY env var
-    institute   = 'DKFZ'
-    dataSizeTag = 'mixed'                 // small | medium | large | mixed
-}
-```
-
-Then run the pipeline as usual:
+No plugin to install. Copy [`gwrepo.config`](gwrepo.config) into your pipeline (or
+`-c gwrepo.config`), fill in your institute / data-size tag / API key, and run:
 
 ```bash
 export GWREPO_API_KEY=<your API_KEY from .env>
-nextflow run <pipeline>
+nextflow run <pipeline> -c gwrepo.config
 ```
 
-### 3. What Gets Collected
+Once the run finishes, `submit_run.py` runs both post-run importers (file
+provenance + CO2) in one command. It declares its one dependency (`typer`) inline
+([PEP 723](https://peps.python.org/pep-0723/)), so with
+[`uv`](https://docs.astral.sh/uv/) installed there's no separate install step:
 
-**Workflow** (`onFlowCreate` / `onFlowComplete`): run name, Nextflow version, revision,
-start time, duration, final state.
+```bash
+uv run submit_run.py --run-dir .
+```
 
-**Per task** (`onTaskComplete` / `onTaskCached`): process name, module, container, exit
-status, requested vs. actual CPU / memory / time / disk, `%cpu`, `%mem`, `peak_rss`,
-`peak_vmem`, `rchar` / `wchar`, `read_bytes` / `write_bytes`, realtime, queue.
+`--skip-co2` / `--skip-lineage` run just one (e.g. if `nf-co2footprint` wasn't
+enabled for this run); `--dry-run` previews without POSTing. See below for what
+each importer does, or run them individually.
 
-**File provenance:** input and output file paths, each with a SHA-256 of its content.
+### 1. Live execution & resource metrics — `tower {}`
 
-See [`plugin/nf-gwrepo/README.md`](plugin/nf-gwrepo/README.md) for details.
+```groovy
+tower {
+    enabled     = true
+    endpoint    = 'http://localhost:80/DKFZ/mixed'   // GW-RePO API base URL + /<institute>/<dataSizeTag>
+    accessToken = secrets.GWREPO_API_KEY             // or the GWREPO_API_KEY env var; any non-empty string
+}
+```
 
-### 4. CO2 footprint (optional)
+This is Nextflow's own built-in Tower/Seqera Platform client — the API implements
+the receiving side of that protocol. Streamed live, as the run proceeds:
+
+**Workflow** (`/trace/create`, `/begin`, `/complete`): run name, Nextflow version,
+revision, start time, duration, final state.
+
+**Per task** (`/trace/{id}/progress`, `/heartbeat`): process name, module, container,
+exit status, requested vs. actual CPU / memory / time / disk, `%cpu`, `%mem`,
+`peak_rss`, `peak_vmem`, `rchar` / `wchar`, `read_bytes` / `write_bytes`, realtime,
+queue.
+
+### 2. File provenance — `lineage {}` + `lineage-import`
+
+```groovy
+lineage {
+    enabled = true
+}
+```
+
+```bash
+nextflow run <pipeline> -c gwrepo.config && python lineage-import/submit_lineage.py
+```
+
+Input and output file paths per task, each with a SHA-256 of its content — computed
+by the importer itself after the run (`nf-lineage`'s own checksum is a metadata hash,
+not content). See [`lineage-import/README.md`](lineage-import/README.md).
+
+### 3. CO2 footprint (optional)
 
 CO2 and energy data comes from the [`nf-co2footprint`](https://nextflow-io.github.io/nf-co2footprint/)
 plugin, imported after the run by a small script (`nf-co2footprint` writes its files
-during Nextflow shutdown, too late for `nf-gwrepo` to read them live):
+during Nextflow shutdown, too late to read live):
 
 ```groovy
 plugins {
-    id 'nf-gwrepo'
     id 'nf-co2footprint'
 }
 co2footprint {
@@ -124,7 +148,7 @@ co2footprint {
 ```
 
 ```bash
-nextflow run <pipeline> && python co2-import/submit_co2.py
+nextflow run <pipeline> -c gwrepo.config && python co2-import/submit_co2.py
 ```
 
 See [`co2-import/README.md`](co2-import/README.md).

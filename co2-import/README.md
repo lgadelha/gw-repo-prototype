@@ -2,13 +2,13 @@
 
 Post-run CO2 importer for GW-RePO. Reads [`nf-co2footprint`](https://nextflow-io.github.io/nf-co2footprint/)'s
 provenance file and POSTs per-task CO2 rows plus a workflow summary to the GW-RePO API,
-attaching them to the rows the [`nf-gwrepo`](../plugin/nf-gwrepo/) plugin created during
-the run.
+attaching them to the `ProcessExecution` rows the tower-emulation endpoints
+(`api/main.py`) already created during the run.
 
 ## Why this is a separate step
 
 `nf-co2footprint` writes its output files during Nextflow's *plugin-shutdown* phase —
-after every observer (including `nf-gwrepo`) has already finished. Nothing running inside
+after the tower-emulation POSTs for the run have already landed. Nothing running inside
 Nextflow can reliably read them. So CO2 ingestion runs afterwards, as its own process.
 
 ## Usage
@@ -16,15 +16,17 @@ Nextflow can reliably read them. So CO2 ingestion runs afterwards, as its own pr
 ```bash
 export GWREPO_API_KEY=<your API_KEY from .env>
 
-nextflow run <pipeline> -c gwrepo.config      # nf-gwrepo + nf-co2footprint both enabled
+nextflow run <pipeline> -c gwrepo.config      # tower {} + nf-co2footprint both enabled
 python co2-import/submit_co2.py               # from the same directory
 ```
 
 `submit_co2.py` needs, in the run directory:
 
-- **`.gwrepo-run.json`** — written by the `nf-gwrepo` plugin. Carries the workflow id, the
-  API endpoint, and a `task_id → process_execution_id` map (`nf-co2footprint`'s provenance
-  file identifies tasks only by `task_id`).
+- **`.nextflow/history`** — Nextflow's own always-on run log; its last line gives the
+  workflow id. No gw-repo-specific marker file is used (there's nothing server-side
+  that could write one to the pipeline's launch dir) — the `task_id → process_execution_id`
+  map is instead resolved via `GET /processes/?workflow_execution_id=<id>` (each row's
+  `task_id` column is populated by the tower-emulation endpoints for exactly this).
 - **`co2footprint_provenance*.json`** — written by `nf-co2footprint` (on by default).
 - **`co2footprint_summary*.txt`** — optional; the only source for the "car km" and "tree
   sequestration" figures on the workflow summary. Enable it with
@@ -35,11 +37,10 @@ python co2-import/submit_co2.py               # from the same directory
 | Flag | Default |
 |---|---|
 | `--run-dir` | `.` |
-| `--marker` | `<run-dir>/.gwrepo-run.json` |
 | `--provenance` | newest `co2footprint_provenance*.json` under `--run-dir` |
 | `--summary` | newest `co2footprint_summary*.txt` under `--run-dir` |
-| `--workflow-id` | from the marker |
-| `--endpoint` | from the marker, else `http://localhost:80` |
+| `--workflow-id` | resolved from `.nextflow/history` |
+| `--endpoint` | `http://localhost:80` |
 | `--dry-run` | print payloads instead of POSTing |
 
 ## Wiring it into a run

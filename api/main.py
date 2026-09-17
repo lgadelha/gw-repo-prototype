@@ -1,4 +1,5 @@
-from fastapi import FastAPI, Depends, HTTPException, Security
+import base64
+from fastapi import FastAPI, Depends, HTTPException, Security, Body, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlmodel import SQLModel, Field, create_engine, Session, Relationship, select, delete
 from sqlalchemy import text
@@ -50,6 +51,26 @@ def verify_api_key(credentials: HTTPAuthorizationCredentials = Security(security
     return credentials.credentials
 
 
+def verify_tower_auth(authorization: Optional[str] = Header(None)):
+    """Same API_KEY as verify_api_key, but also accepts the HTTP Basic auth form
+    Nextflow's own tower client sends for a plain (non-JWT) `accessToken`:
+    `Authorization: Basic base64("@token:<accessToken>")`. Used only by the tower
+    emulation routes -- everything else keeps plain `Bearer <API_KEY>`."""
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization[len("Bearer "):]
+    elif authorization and authorization.startswith("Basic "):
+        try:
+            decoded = base64.b64decode(authorization[len("Basic "):]).decode("utf-8")
+        except Exception:
+            raise HTTPException(status_code=401, detail="Invalid API Key")
+        token = decoded.split(":", 1)[1] if ":" in decoded else decoded
+    else:
+        raise HTTPException(status_code=401, detail="Invalid API Key")
+    if token != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API Key")
+    return token
+
+
 class ProcessExecutionParameterInput(SQLModel, table=True):
     process_execution_id: str = Field(foreign_key="processexecution.id", primary_key=True)
     parameter_name: str = Field(primary_key=True)
@@ -89,6 +110,7 @@ class ProcessExecution(SQLModel, table=True):
     id: str = Field(primary_key=True)
     workflow_execution_id: str = Field(foreign_key="workflowexecution.id")
     institute_id: Optional[str] = Field(default="UNKNOWN", foreign_key="institut.id")
+    task_id: Optional[int] = None  # Nextflow's per-run task id (tower payload's `taskId`); lets post-run importers (co2-import, lineage-import) resolve this row without a marker file
     process_name: str
     module_name: Optional[str] = None
     container_name: Optional[str] = None
@@ -157,6 +179,186 @@ def get_workflow(execution_id: str, session: Session = Depends(get_session), api
         raise HTTPException(status_code=404, detail="Workflow not found")
     return workflow
 
+
+# ==================== Tower/Seqera Platform Emulation ====================
+# Nextflow's own core tower client (plugins/nf-tower) pushes here when a pipeline
+# is run with:
+#   tower { enabled = true; endpoint = 'http://<host>/<institute>/<data_size_tag>' }
+# No custom Nextflow plugin needed -- replaces the removed nf-gwrepo plugin. Wire
+# formats (payload shapes, the `hash` truncation, `workflow.id` truncation) were
+# confirmed empirically against Nextflow 26.04.6; see doc/step0b-tower-lineage-wire-formats.md.
+
+def _full_hash(workdir: Optional[str]) -> Optional[str]:
+    """Nextflow's work dir layout is always <workDir>/<2-char>/<30-char-rest>, so
+    the task's own `workdir` path recovers the full task hash from its last two
+    path segments -- the tower payload's `hash` field is a truncated display form
+    ("6b/8675c1") and is not usable as a DB key on its own."""
+    if not workdir:
+        return None
+    parts = workdir.rstrip("/").split("/")
+    if len(parts) < 2:
+        return None
+    return parts[-2] + parts[-1]
+
+
+def _iso_to_epoch(value: Optional[str]) -> Optional[float]:
+    if not value:
+        return None
+    return datetime.fromisoformat(value).timestamp()
+
+
+def _ms_to_s(value) -> Optional[float]:
+    return value / 1000.0 if value is not None else None
+
+
+def _bytes_to_mb(value) -> Optional[float]:
+    return value / (1024.0 * 1024.0) if value is not None else None
+
+
+def _exit_code(value) -> int:
+    if value is None:
+        return -1
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return -1
+    return -1 if v == 2147483647 else v  # Integer.MAX_VALUE sentinel for "not exited"
+
+
+def _str_field(value) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        joined = ":".join(str(v) for v in value if v is not None)
+        return joined or None
+    s = str(value).strip()
+    return None if (not s or s == "-") else s
+
+
+def _ensure_institute(institute_id: str, session: Session):
+    if not session.get(Institut, institute_id):
+        session.merge(Institut(id=institute_id, name=institute_id))
+        session.commit()
+
+
+def _workflow_row_from_payload(wf: dict, institute: str, data_size_tag: str) -> WorkflowExecution:
+    success = wf.get("success")
+    final_state = None if success is None else ("COMPLETED" if success else "FAILED")
+    return WorkflowExecution(
+        id=wf.get("sessionId"),
+        institute_id=institute,
+        data_size_tag=data_size_tag,
+        start_time=_iso_to_epoch(wf.get("start")),
+        duration=_ms_to_s(wf.get("duration")),
+        run_name=wf.get("runName"),
+        nextflow_version=(wf.get("nextflow") or {}).get("version"),
+        final_state=final_state,
+        revision_id=wf.get("revision") or wf.get("commitId"),
+    )
+
+
+def _upsert_tasks(tasks: List[dict], workflow_id: str, institute: str, data_size_tag: str, session: Session):
+    for task in tasks:
+        full_hash = _full_hash(task.get("workdir"))
+        if not full_hash:
+            continue
+        session.merge(ProcessExecution(
+            id=f"{workflow_id}_{full_hash}",
+            workflow_execution_id=workflow_id,
+            institute_id=institute,
+            task_id=task.get("taskId"),
+            process_name=_str_field(task.get("process")) or _str_field(task.get("name")) or "UNKNOWN",
+            module_name=_str_field(task.get("module")),
+            container_name=_str_field(task.get("container")),
+            final_status=_str_field(task.get("status")) or "UNKNOWN",
+            exit_code=_exit_code(task.get("exit")),
+            start_time=_iso_to_epoch(task.get("start")) or 0.0,
+            duration=_ms_to_s(task.get("duration")) or 0.0,
+            realtime=_ms_to_s(task.get("realtime")) or 0.0,
+            cpus_requested=task.get("cpus"),
+            time_requested=_ms_to_s(task.get("time")),
+            storage_requested=_bytes_to_mb(task.get("disk")),
+            memory_requested=_bytes_to_mb(task.get("memory")),
+            queue_name=_str_field(task.get("queue")),
+            percent_cpu=task.get("pcpu") or 0.0,
+            percent_memory=task.get("pmem") or 0.0,
+            peak_rss=_bytes_to_mb(task.get("peakRss")) or 0.0,
+            peak_vmem=_bytes_to_mb(task.get("peakVmem")) or 0.0,
+            read_char=_bytes_to_mb(task.get("rchar")) or 0.0,
+            write_char=_bytes_to_mb(task.get("wchar")) or 0.0,
+            read_bytes=task.get("readBytes"),
+            write_bytes=task.get("writeBytes"),
+            peak_rss_mb=_bytes_to_mb(task.get("peakRss")),
+            peak_vmem_mb=_bytes_to_mb(task.get("peakVmem")),
+            data_size_tag=data_size_tag,
+        ))
+
+
+@app.post("/{institute}/{data_size_tag}/trace/create")
+def tower_trace_create(
+    institute: str,
+    data_size_tag: str,
+    payload: dict = Body(...),
+    session: Session = Depends(get_session),
+    api_key: str = Depends(verify_tower_auth),
+):
+    session_id = payload.get("sessionId")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="missing sessionId")
+    _ensure_institute(institute, session)
+    session.merge(WorkflowExecution(id=session_id, institute_id=institute, data_size_tag=data_size_tag))
+    session.commit()
+    # Nextflow's tower client uses whatever id comes back here as {workflowId} in
+    # every later /trace/{workflowId}/... call -- echo the full session id so every
+    # gw-repo row stays keyed on Nextflow's own session.uniqueId.
+    return {"workflowId": session_id}
+
+
+@app.put("/{institute}/{data_size_tag}/trace/{workflow_id}/begin")
+def tower_trace_begin(
+    institute: str,
+    data_size_tag: str,
+    workflow_id: str,
+    payload: dict = Body(...),
+    session: Session = Depends(get_session),
+    api_key: str = Depends(verify_tower_auth),
+):
+    wf = payload.get("workflow") or {}
+    session.merge(_workflow_row_from_payload(wf, institute, data_size_tag))
+    session.commit()
+    return {"watchUrl": f"/{institute}/{data_size_tag}/workflows/{workflow_id}"}
+
+
+@app.put("/{institute}/{data_size_tag}/trace/{workflow_id}/progress")
+@app.put("/{institute}/{data_size_tag}/trace/{workflow_id}/heartbeat")
+def tower_trace_progress(
+    institute: str,
+    data_size_tag: str,
+    workflow_id: str,
+    payload: dict = Body(...),
+    session: Session = Depends(get_session),
+    api_key: str = Depends(verify_tower_auth),
+):
+    _upsert_tasks(payload.get("tasks") or [], workflow_id, institute, data_size_tag, session)
+    session.commit()
+    return {}
+
+
+@app.put("/{institute}/{data_size_tag}/trace/{workflow_id}/complete")
+def tower_trace_complete(
+    institute: str,
+    data_size_tag: str,
+    workflow_id: str,
+    payload: dict = Body(...),
+    session: Session = Depends(get_session),
+    api_key: str = Depends(verify_tower_auth),
+):
+    wf = payload.get("workflow") or {}
+    session.merge(_workflow_row_from_payload(wf, institute, data_size_tag))
+    session.commit()
+    return {}
+
+
 # CO2 endpoints must come BEFORE /processes/{process_id} to avoid route conflicts
 @app.post("/processes/co2", response_model=Co2footprint)
 def create_process_co2_footprint(
@@ -195,8 +397,15 @@ def create_process(process: ProcessExecution, session: Session = Depends(get_ses
     return db_obj
 
 @app.get("/processes/", response_model=List[ProcessExecution])
-def get_processes(session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
-    return session.exec(select(ProcessExecution)).all()
+def get_processes(
+    workflow_execution_id: Optional[str] = None,
+    session: Session = Depends(get_session),
+    api_key: str = Depends(verify_api_key),
+):
+    query = select(ProcessExecution)
+    if workflow_execution_id:
+        query = query.where(ProcessExecution.workflow_execution_id == workflow_execution_id)
+    return session.exec(query).all()
 
 @app.get("/processes/{process_id}", response_model=ProcessExecution)
 def get_process(process_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):

@@ -3,19 +3,22 @@
 Post-run CO2 importer for GW-RePO.
 
 nf-co2footprint writes its output files during Nextflow's plugin-shutdown phase, i.e.
-*after* every observer (including nf-gwrepo) has finished. Nothing running inside
-Nextflow can reliably read them. This script runs afterwards: it reads
+*after* the tower-emulation POSTs for the run have already landed. Nothing running
+inside Nextflow can reliably read them. This script runs afterwards: it reads
 nf-co2footprint's provenance JSON and POSTs per-task CO2 rows plus a workflow summary
-to the GW-RePO API, matching the rows nf-gwrepo already created during the run.
+to the GW-RePO API, matching the ProcessExecution rows the tower emulation endpoints
+(api/main.py) already created during the run.
 
 Usage:
-    python co2-import/submit_co2.py [--run-dir .] [--provenance PATH] [--marker PATH]
+    python co2-import/submit_co2.py [--run-dir .] [--provenance PATH]
 
-Needs GWREPO_API_KEY in the environment (same key the plugin uses).
+Needs GWREPO_API_KEY in the environment (same key used for `tower.accessToken`).
 
 Requires:
-    - <run-dir>/.gwrepo-run.json  -- written by the nf-gwrepo plugin; carries the
-      workflow id, the API endpoint, and a task_id -> process_execution_id map.
+    - <run-dir>/.nextflow/history -- Nextflow's own always-on run log; its last
+      line's sessionId column gives the workflow id (no gw-repo-specific marker
+      file needed -- there is nothing server-side that could write one to the
+      pipeline's launch dir).
     - a co2footprint_provenance_*.json somewhere under <run-dir> (or --provenance).
 """
 
@@ -136,6 +139,44 @@ def post(endpoint, path, api_key, payload):
         return None, str(e.reason)
 
 
+def get_json(endpoint, path, api_key):
+    req = urllib.request.Request(
+        endpoint.rstrip("/") + path,
+        method="GET",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+# --- workflow / process-id resolution --------------------------------------
+# No gw-repo-specific marker file (the old plugin's .gwrepo-run.json) exists
+# anymore -- the tower-emulation API is a remote HTTP receiver with no
+# filesystem access to the pipeline's launch dir. Resolve everything from
+# Nextflow's own bookkeeping and the API instead.
+
+def resolve_workflow_id(run_dir):
+    """The last line of Nextflow's own <run-dir>/.nextflow/history, column 6
+    (0-indexed 5): timestamp, duration, runName, status, revisionId, sessionId,
+    command -- tab-separated, one line appended per run."""
+    history = Path(run_dir) / ".nextflow" / "history"
+    if not history.is_file():
+        return None
+    lines = [l for l in history.read_text(encoding="utf-8").splitlines() if l.strip()]
+    if not lines:
+        return None
+    cols = lines[-1].split("\t")
+    return cols[5] if len(cols) > 5 else None
+
+
+def resolve_process_map(endpoint, api_key, workflow_id):
+    """task_id -> process_execution_id, from the ProcessExecution rows the tower
+    emulation endpoints already created for this workflow (task_id column added
+    for exactly this purpose)."""
+    rows = get_json(endpoint, f"/processes/?workflow_execution_id={workflow_id}", api_key)
+    return {str(r["task_id"]): r["id"] for r in rows if r.get("task_id") is not None}
+
+
 # --- file discovery -------------------------------------------------------
 
 def newest(pattern, root):
@@ -146,11 +187,10 @@ def newest(pattern, root):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run-dir", default=".", help="dir the pipeline ran in (default: .)")
-    ap.add_argument("--marker", help="path to .gwrepo-run.json (default: <run-dir>/.gwrepo-run.json)")
     ap.add_argument("--provenance", help="path to co2footprint_provenance_*.json (default: newest under --run-dir)")
     ap.add_argument("--summary", help="path to co2footprint_summary_*.txt (default: newest under --run-dir)")
-    ap.add_argument("--workflow-id", help="override the workflow id from the marker")
-    ap.add_argument("--endpoint", help="override the API endpoint from the marker")
+    ap.add_argument("--workflow-id", help="override the workflow id resolved from .nextflow/history")
+    ap.add_argument("--endpoint", default="http://localhost:80", help="GW-RePO API base URL (default: http://localhost:80)")
     ap.add_argument("--dry-run", action="store_true", help="print payloads, don't POST")
     args = ap.parse_args()
 
@@ -158,18 +198,19 @@ def main():
     if not api_key and not args.dry_run:
         sys.exit("GWREPO_API_KEY not set")
 
-    marker_path = Path(args.marker) if args.marker else Path(args.run_dir) / ".gwrepo-run.json"
-    marker = {}
-    if marker_path.is_file():
-        marker = json.loads(marker_path.read_text(encoding="utf-8"))
-    elif not args.workflow_id:
-        sys.exit(f"{marker_path} not found -- run the pipeline with the nf-gwrepo plugin, or pass --workflow-id")
-
-    workflow_id = args.workflow_id or marker.get("workflow_id")
-    endpoint = args.endpoint or marker.get("endpoint") or "http://localhost:80"
-    processes = marker.get("processes", {})
+    workflow_id = args.workflow_id or resolve_workflow_id(args.run_dir)
     if not workflow_id:
-        sys.exit("no workflow id (marker has none, --workflow-id not given)")
+        sys.exit(f"no workflow id -- {args.run_dir}/.nextflow/history not found or empty, "
+                  "and --workflow-id not given")
+
+    endpoint = args.endpoint
+    try:
+        processes = resolve_process_map(endpoint, api_key, workflow_id)
+    except (urllib.error.HTTPError, urllib.error.URLError) as e:
+        sys.exit(f"could not fetch processes for workflow {workflow_id} from {endpoint}: {e}")
+    if not processes:
+        sys.exit(f"no ProcessExecution rows found for workflow {workflow_id} at {endpoint} -- "
+                  "was the pipeline run with `tower {{ enabled = true }}` pointed at this API?")
 
     prov_path = args.provenance or newest("co2footprint_provenance*.json", args.run_dir)
     if not prov_path:
@@ -185,7 +226,7 @@ def main():
         task_id = str(_value(task, "task_id"))
         pid = processes.get(task_id)
         if not pid:
-            print(f"  ! task_id {task_id} ({_value(task, 'name')}) not in marker -- skipping")
+            print(f"  ! task_id {task_id} ({_value(task, 'name')}) has no matching ProcessExecution row -- skipping")
             skipped += 1
             continue
         row = process_co2_row(task, pid)
@@ -211,8 +252,8 @@ def main():
 
     print(f"done: {posted} task rows, {skipped} skipped, {failed} failed")
     if skipped and not posted:
-        sys.exit("every task was skipped -- the marker's process map does not match this "
-                 "provenance file (stale .gwrepo-run.json, or wrong --run-dir?)")
+        sys.exit("every task was skipped -- the resolved process map does not match this "
+                 "provenance file (wrong --run-dir, or --workflow-id from a different run?)")
     sys.exit(1 if failed else 0)
 
 
