@@ -755,7 +755,7 @@ def train_ml_models(
         print(f"Training per-process ML models{'for institute ' + institute_id if institute_id else 'for all institutes'}...")
         
         # Extract features from database
-        df = extract_process_features(session, institute_id)
+        df = extract_process_features(session)
         
         if df.empty:
             return {
@@ -899,7 +899,7 @@ def retrain_ml_models(
         print(f"Retraining per-process ML models...")
         
         # Extract features from database
-        df = extract_process_features(session, institute_id)
+        df = extract_process_features(session)
         
         if df.empty:
             return {

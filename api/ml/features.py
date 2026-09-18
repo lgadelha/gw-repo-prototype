@@ -10,7 +10,7 @@ from sqlmodel import Session, select
 from datetime import datetime, timezone
 
 
-def extract_process_features(session: Session, institute_id: Optional[str] = None) -> pd.DataFrame:
+def extract_process_features(session: Session) -> pd.DataFrame:
     """
     Extract features from process execution data for ML training.
     
@@ -46,15 +46,12 @@ def extract_process_features(session: Session, institute_id: Optional[str] = Non
         p.write_bytes,
         p.peak_vmem_mb,
         p.peak_rss_mb,
-        p.institute_id,
         w.run_name,
         w.nextflow_version
     FROM processexecution p
     LEFT JOIN workflowexecution w ON p.workflow_execution_id = w.id
     """
-    
-    if institute_id:
-        query += f" WHERE p.institute_id = '{institute_id}'"
+
     
     # Execute query
     df = pd.read_sql(query, session.bind)
@@ -180,7 +177,6 @@ def prepare_training_data(df: pd.DataFrame, target: str = 'target_memory_mb') ->
     """
     
     # Select features for training - EXACT match with what model expects
-    # (NO process_base - model was trained without process identity)
     # ALL models use SAME features for simplicity
     feature_columns = [
         'has_module',
@@ -213,11 +209,6 @@ def prepare_training_data(df: pd.DataFrame, target: str = 'target_memory_mb') ->
     # Filter to rows with valid target
     df_clean = df[df[target].notna()].copy()
     
-    # For PER-PROCESS models: Don't include process_base as a feature
-    # Each model is already specific to one process
-    # (Global fallback model would need process_base, but we're not using it there either)
-    
-    # Convert feature columns to numeric (EXPLICIT selection)
     for col in feature_columns:
         if col in df_clean.columns:
             df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce').fillna(0)
@@ -258,9 +249,5 @@ def get_feature_statistics(df: pd.DataFrame) -> Dict:
     # Process name distribution
     if 'process_base' in df.columns:
         stats['process_distribution'] = df['process_base'].value_counts().head(20).to_dict()
-    
-    # Institute distribution
-    if 'institute_id' in df.columns:
-        stats['institute_distribution'] = df['institute_id'].value_counts().to_dict()
-    
+      
     return stats

@@ -19,15 +19,16 @@ with st.sidebar:
     st.divider()
     
     st.subheader("Navigation")
-    page = st.radio(
-        "Go to",
-        ["Dashboard", "Analytics", "ML Training", "Optimizations", "Model Performance"],
+    page = st.selectbox(
+        "Select page",
+        ["Workflow Summaries", "Dashboard", "Analytics", "ML Training", "Optimizations", "Model Performance"],
+        index=0,
         label_visibility="collapsed"
     )
 
 def render_resource_charts(df: pd.DataFrame):
-    st.title("📊 Dashboard - Workflow Metrics")
-    st.write("View **historical execution data** from your submitted workflows.")
+    st.title("📊 Dashboard - Execution Metrics")
+    st.write("View **historical execution data** from your submitted workflow.")
     
     # ============================================
     # DETAILED DATA TABLE - ALL RUNS
@@ -323,49 +324,12 @@ def fetch_process_data(api_key_val):
 def normalize_process_name(name):
     """
     Normalize process name using nfcore_modules.py logic.
-    Fetches official nf-core modules from GitHub API with caching.
+    Uses nf-core.cache file for official module names.
     """
     import sys
     sys.path.append('api')
-    try:
-        from nfcore_modules import normalize_module_name
-        return normalize_module_name(name)
-    except ImportError:
-        pass
-    
-    # Fallback: same logic inline (for when API module unavailable)
-    if not isinstance(name, str):
-        return str(name)
-    
-    base = name.split(' (')[0] if ' (' in name else name
-    if ':' in base:
-        module = base.split(':')[-1]
-    else:
-        module = base
-    module = module.upper()
-    parts = module.split('_')
-    
-    # Common nf-core tools fallback
-    KNOWN_TOOLS = {
-        'HAPPY', 'TABIX', 'BCFTOOLS', 'RTGTOOLS', 'TRUVARI', 'PICARD',
-        'MULTIQC', 'BEDTOOLS', 'SAMTOOLS', 'GATK', 'GATK4', 'BWA',
-        'BOWTIE2', 'STAR', 'HISAT2', 'SALMON', 'KALLISTO', 'FASTQC',
-        'TRIMGALORE', 'TRIMMOMATIC', 'CUTADAPT', 'MINIMAP2', 'MACS2',
-        'DESEQ2', 'EDGER', 'LIMMA', 'STRINGTIE', 'RSEM', 'CELLRANGER',
-        'SEURAT', 'SCANPY', 'KRAKEN2', 'KRONA', 'METAPHLAN', 'HUMANN3',
-        'PROKKA', 'ROARY', 'SPADES', 'MEGAHIT', 'FLYE', 'CANU', 'MEDAKA',
-        'RACON', 'PORECHOP', 'NANOPLOT', 'BUSCO', 'QUAST', 'CHECKM',
-        'MANTA', 'DELLY', 'SVIM', 'SVDB', 'LUMPY', 'SURVIVOR', 'PLINK',
-        'PLINK2', 'HTSLIB', 'MARKDUPLICATES', 'QUALIMAP', 'PRESEQ',
-        'DATAVZRD', 'AARDVARK', 'SVANALYZER', 'UCSC', 'GNU',
-    }
-    
-    if parts and parts[0] in KNOWN_TOOLS and len(parts) >= 2:
-        return f'{parts[0]}_{parts[1]}'
-    
-    return module
-    
-    return module
+    from nfcore_modules import normalize_module_name
+    return normalize_module_name(name)
 
 
 def render_analytics():
@@ -445,11 +409,7 @@ def render_analytics():
     df_valid['mem_disk_ratio'] = df_valid['peak_rss'] / (df_valid['disk_usage_mb'] + 0.001)
     df_valid['io_intensity'] = df_valid['io_total_mb'] / (df_valid['disk_usage_mb'] + 0.001)
     
-    # Show how many original process variants were merged
-    original_names = df_process['short_name'].unique()
-    variant_info = f" ({len(original_names)} variant{'s' if len(original_names) > 1 else ''})" if len(original_names) > 1 else ""
-    
-    st.info(f"Showing {len(df_valid)} runs for **{selected_process}{variant_info}**")
+    st.info(f"Showing {len(df_valid)} runs for **{selected_process}**")
     
     # User options
     col_opt1, col_opt2 = st.columns(2)
@@ -463,7 +423,7 @@ def render_analytics():
     # ============================================
     # PLOT 1: Memory (peak_rss) vs Disk Size
     # ============================================
-    st.subheader(f"📊 Memory vs Disk Size - {selected_process}{variant_info}")
+    st.subheader(f"📊 Memory vs Disk Size - {selected_process}")
     
     fig_mem = px.scatter(
         df_valid,
@@ -496,7 +456,7 @@ def render_analytics():
     # ============================================
     # PLOT 2: Actual CPU Cores Used vs Disk Size
     # ============================================
-    st.subheader(f"💻 Actual CPU Cores Used vs Disk Size - {selected_process}{variant_info}")
+    st.subheader(f"💻 Actual CPU Cores Used vs Disk Size - {selected_process}")
     st.write("*Calculated as: percent_cpu / 100 (RAW CPU usage across all cores)*")
     
     fig_cpu = px.scatter(
@@ -530,7 +490,7 @@ def render_analytics():
     # ============================================
     # PLOT 3: Duration vs Disk Size
     # ============================================
-    st.subheader(f"⏱️ Duration vs Disk Size - {selected_process}{variant_info}")
+    st.subheader(f"⏱️ Duration vs Disk Size - {selected_process}")
     
     fig_dur = px.scatter(
         df_valid,
@@ -569,7 +529,7 @@ def render_analytics():
     # ============================================
     # PLOT 4: Data Read vs Disk Size
     # ============================================
-    st.subheader(f"📥 Data Read vs Disk Size - {selected_process}{variant_info}")
+    st.subheader(f"📥 Data Read vs Disk Size - {selected_process}")
     
     fig_read = px.scatter(
         df_valid,
@@ -602,7 +562,7 @@ def render_analytics():
     # ============================================
     # PLOT 5: Data Written vs Disk Size
     # ============================================
-    st.subheader(f"📤 Data Written vs Disk Size - {selected_process}{variant_info}")
+    st.subheader(f"📤 Data Written vs Disk Size - {selected_process}")
     
     fig_write = px.scatter(
         df_valid,
@@ -635,7 +595,7 @@ def render_analytics():
     # ============================================
     # PLOT 6: Memory vs I/O (Memory-Heavy Detection)
     # ============================================
-    st.subheader(f"🧠 Memory vs I/O - {selected_process}{variant_info}")
+    st.subheader(f"🧠 Memory vs I/O - {selected_process}")
     st.write("*High memory with low I/O = memory-intensive computation*")
     
     fig_mem_io = px.scatter(
@@ -1158,14 +1118,83 @@ def render_model_performance():
     except Exception as e:
         st.error(f"Connection failed: {e}")
 
-def main():
-    st.title("Nextflow Process Resource Monitoring")
+
+def render_workflow_summaries():
+    """Workflow Summaries page showing workflow-level metrics."""
+    st.title("📊 Workflow Summaries")
+    st.write("**Workflow-level execution metrics and visualizations**")
     
     if not API_KEY:
         st.warning("Please enter your API key in the sidebar to authenticate.")
         return
     
-    if page == "Dashboard":
+    headers = {"Authorization": f"Bearer {API_KEY}"}
+    
+    try:
+        response = requests.get(f"{API_BASE_URL}/workflows/", headers=headers)
+        
+        if response.status_code == 200:
+            workflows = response.json()
+            
+            if not workflows:
+                st.info("No workflow data available. Submit workflow runs first.")
+                return
+            
+            st.metric("Total Workflow Runs", len(workflows))
+            
+            df = pd.DataFrame(workflows)
+            
+            if not df.empty:
+                st.subheader("📋 Workflow Execution Table")
+                display_cols = [col for col in ['id', 'run_name', 'final_state', 'wall_clock_sec', 'peak_cpu_percent', 'peak_memory_mb', 'max_concurrent_processes'] if col in df.columns]
+                if display_cols:
+                    st.dataframe(df[display_cols], use_container_width=True)
+                
+                st.divider()
+                st.subheader("📊 Workflow Metrics Visualizations")
+                
+                if 'final_state' in df.columns:
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        status_counts = df['final_state'].value_counts()
+                        fig = px.pie(values=status_counts.values, names=status_counts.index, title='Workflow Status Distribution')
+                        st.plotly_chart(fig, use_container_width=True)
+                    
+                    with col2:
+                        if 'wall_clock_sec' in df.columns:
+                            df_clean = df[df['wall_clock_sec'].notna()]
+                            if not df_clean.empty:
+                                fig = px.histogram(df_clean, x='wall_clock_sec', title='Wall Clock Time Distribution', nbins=20)
+                                fig.update_layout(xaxis_title='Duration (seconds)')
+                                st.plotly_chart(fig, use_container_width=True)
+                
+                if 'peak_memory_mb' in df.columns and 'peak_cpu_percent' in df.columns:
+                    df_clean = df[(df['peak_memory_mb'].notna()) & (df['peak_cpu_percent'].notna())]
+                    if not df_clean.empty:
+                        fig = px.scatter(df_clean, x='peak_memory_mb', y='peak_cpu_percent', title='Memory vs CPU Usage',
+                                        hover_data=['run_name'] if 'run_name' in df_clean.columns else None)
+                        st.plotly_chart(fig, use_container_width=True)
+                
+                if 'max_concurrent_processes' in df.columns:
+                    df_clean = df[df['max_concurrent_processes'].notna()]
+                    if not df_clean.empty:
+                        fig = px.histogram(df_clean, x='max_concurrent_processes', title='Concurrent Processes Distribution', nbins=20)
+                        st.plotly_chart(fig, use_container_width=True)
+                        
+    except Exception as e:
+        st.error(f"Failed to fetch workflow data: {e}")
+
+
+def main():
+    st.title("GW-RePO (Genomic Workflow Resource and Parameter Optimization)")
+    
+    if not API_KEY:
+        st.warning("Please enter your API key in the sidebar to authenticate.")
+        return
+    
+    if page == "Workflow Summaries":
+        render_workflow_summaries()
+    elif page == "Dashboard":
         df = fetch_process_data(API_KEY)
         render_resource_charts(df)
     elif page == "Analytics":
