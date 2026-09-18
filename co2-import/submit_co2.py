@@ -210,7 +210,7 @@ def main():
         sys.exit(f"could not fetch processes for workflow {workflow_id} from {endpoint}: {e}")
     if not processes:
         sys.exit(f"no ProcessExecution rows found for workflow {workflow_id} at {endpoint} -- "
-                  "was the pipeline run with `tower {{ enabled = true }}` pointed at this API?")
+                  "was the pipeline run with `tower { enabled = true }` pointed at this API?")
 
     prov_path = args.provenance or newest("co2footprint_provenance*.json", args.run_dir)
     if not prov_path:

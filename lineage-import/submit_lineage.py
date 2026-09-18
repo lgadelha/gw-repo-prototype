@@ -181,7 +181,7 @@ def main():
         sys.exit(f"could not fetch processes for workflow {workflow_id} from {args.endpoint}: {e}")
     if not processes:
         sys.exit(f"no ProcessExecution rows found for workflow {workflow_id} at {args.endpoint} -- "
-                  "was the pipeline run with `tower {{ enabled = true }}` pointed at this API?")
+                  "was the pipeline run with `tower { enabled = true }` pointed at this API?")
 
     print(f"workflow {workflow_id}")
     print(f"lineage store {lineage_dir}")

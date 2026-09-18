@@ -241,11 +241,15 @@ def _ensure_institute(institute_id: str, session: Session):
         session.commit()
 
 
-def _workflow_row_from_payload(wf: dict, institute: str, data_size_tag: str) -> WorkflowExecution:
+def _workflow_row_from_payload(wf: dict, workflow_id: str, institute: str, data_size_tag: str) -> WorkflowExecution:
+    """`workflow_id` (from the URL path, always present -- it's whatever
+    /trace/create echoed back) is the fallback if `wf.sessionId` is somehow
+    missing from the payload, so a malformed/partial `workflow` object can't
+    crash the request with a NOT NULL violation on the primary key."""
     success = wf.get("success")
     final_state = None if success is None else ("COMPLETED" if success else "FAILED")
     return WorkflowExecution(
-        id=wf.get("sessionId"),
+        id=wf.get("sessionId") or workflow_id,
         institute_id=institute,
         data_size_tag=data_size_tag,
         start_time=_iso_to_epoch(wf.get("start")),
@@ -324,7 +328,7 @@ def tower_trace_begin(
     api_key: str = Depends(verify_tower_auth),
 ):
     wf = payload.get("workflow") or {}
-    session.merge(_workflow_row_from_payload(wf, institute, data_size_tag))
+    session.merge(_workflow_row_from_payload(wf, workflow_id, institute, data_size_tag))
     session.commit()
     return {"watchUrl": f"/{institute}/{data_size_tag}/workflows/{workflow_id}"}
 
@@ -354,7 +358,7 @@ def tower_trace_complete(
     api_key: str = Depends(verify_tower_auth),
 ):
     wf = payload.get("workflow") or {}
-    session.merge(_workflow_row_from_payload(wf, institute, data_size_tag))
+    session.merge(_workflow_row_from_payload(wf, workflow_id, institute, data_size_tag))
     session.commit()
     return {}
 
