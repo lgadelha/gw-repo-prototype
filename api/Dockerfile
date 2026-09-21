@@ -10,8 +10,6 @@ RUN pip install --no-cache-dir --upgrade -r /code/requirements.txt
 
 COPY ./main.py /code/
 COPY ./models.py /code/
-COPY ./migrate.py /code/
-COPY ./migrate_per_process_models.py /code/
 COPY ./nfcore_modules.py /code/
 COPY ./ml/ /code/ml/
 

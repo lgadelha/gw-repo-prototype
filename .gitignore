@@ -4,7 +4,6 @@
 .agents/*
 
 # Environment files
-client/.env
 api/.env
 db/.env
 .env

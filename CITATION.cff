@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+  - family-names: Gadelha
+    given-names: Luiz
+    orcid: https://orcid.org/0000-0002-8122-9522
+  - family-names: Narcı
+    given-names: Kübra
+    orcid: https://orcid.org/0000-0002-3532-2152
+title: "GW-RePO"
+version: 0.0.1
+identifiers:
+  - type: doi
+    value: 10.1145/3736229.3736267
+date-released: 2025-12-01
+

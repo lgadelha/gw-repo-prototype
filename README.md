@@ -12,69 +12,59 @@ docker compose up -d
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                    Nextflow Pipeline Execution                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-       │
-       ├───────────────┬───────────────┬───────────────┬──────────────┬
-       ▼               ▼               ▼               ▼              ▼              
-┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-│     work     │ │   bco.json   │ │  trace.txt   │ │nextflow.log  │ │co2footprint_*│
-│  directory   │ │  (optional)  │ │  (required)  │ │  (optional)  │ │  (optional)  │
-└──────────────┘ └──────────────┘ └──────────────┘ └──────────────┘ └──────────────┘
-       │               │               │               │              │
-       └───────────────┴───────────────┴───────────────┴──────────────┘
-                                              │
-                                              ▼
-                                 [ ETL Script and API Client ]
-                                              │
-                                              ▼ (HTTP POST / Bearer Token)
-┌─────────────────────────────────────────────────────────────────────┐
-│                         Centralized Service                         │
-│                                                                     │
-│                     ┌───────────────────┐                           │
-│                     │    GW RePO API    │◄──────────────┐           │
-│                     └─────────┬─────────┘               │           │
-│       (Reads/Writes)          │                         │ (REST     │
-│       ┌───────────────────────┘                         │  API)     │
-│       ▼                                                 │           │
-│ ┌────────────┐                  ┌──────────────────┐    │           │
-│ │ PostgreSQL │                  │ ML Resource      │    │           │
-│ │  Database  │                  │    Models        │    │           │
-│ └────────────┘                  └──────────────────┘    │           │
-│       ▲                                                 │           │
-│       │                                                 │           │
-│       │                  ┌───────────────────┐          │           │
-│       └──────────────────│ Streamlit UI App  │◄─────────┘           │
-│                          │ (User Facing)     │                      │
-│                          │ ───────────────── │                      │
-│                          │ 1. Workflow       │                      │
-│                          │    Summaries      │                      │
-│                          │ 2. Analytics &    │                      │
-│                          │    Dashboard      │                      │
-│                          │ 3. Bayesian       │                      │
-│                          │    Modelling      │                      │
-│                          │   - Training      │                      │
-│                          │   - Optimizations │                      │
-│                          │   - Bulk Opt.     │                      │
-│                          └───────────────────┘                      │
-└─────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│           Nextflow Pipeline Execution        │
+│   ┌──────────────────────────────────────┐   │
+│   │   tower {} — Nextflow's own core     │   │
+│   │   Tower/Seqera-Platform HTTP client  │   │
+│   └──────────────────────────────────────┘   │
+└───────────────────────┬──────────────────────┘
+                        │  live, as the run proceeds
+                        ▼  (HTTP POST/PUT / Bearer or Basic auth)
+┌────────────────────────────────────────────────────────────────┐
+│                      Centralized Service                       │
+│                                                                │
+│                     ┌───────────────────┐                      │
+│                     │    GW RePO API    │◄──────┐              │
+│                     │  (incl. tower     │       │              │
+│                     │  emulation routes)│       │              │
+│                     └───────┬───┬───────┘       │              │
+│       (Reads/Writes)        │   │               │ (REST API    │
+│       ┌─────────────────────┘   └───────┐       │  Queries)    │
+│       ▼                                 ▼       │              │
+│ ┌────────────┐                  ┌──────────────┐│              │
+│ │ PostgreSQL │                  │ ML Resource  ││              │
+│ │  Database  │                  │    Models    ││              │
+│ └────────────┘                  └──────────────┘│              │
+│                                                 │              │
+│                     ┌───────────────────┐       │              │
+│                     │ Streamlit UI App  ├───────┘              │
+│                     │   (User Facing)   │                      │
+│                     └───────────────────┘                      │
+└────────────────────────────────────────────────────────────────┘
+                        ▲
+                        │  post-run (files/records already on disk)
+        lineage-import/submit_lineage.py, co2-import/submit_co2.py
 ```
 
-**Data Sources:**
-
-- **work directory** *(optional, `--work-dir`)* — Disk usage, I/O bytes, peak memory from procfs
-- **bco.json** *(optional)* — Provenance data, input/output files, parameters
-- **trace.txt** *(required)* — Process metrics: CPU%, memory%, duration, I/O
-- **nextflow.log** *(optional)* — Workflow-level: run_name, session_id, wall_clock, status
-- **co2footprint_*.txt** *(optional)* — Energy (mWh), CO2e (mg), car km equivalent, tree sequestration time
+**Data source:** no custom Nextflow plugin — three things Nextflow already ships,
+each covering one concern, with no overlap:
+- **`tower {}`** (built into Nextflow core) streams workflow metadata and per-task
+  resource metrics (CPU, memory, duration, I/O) to the API live, as the pipeline
+  runs. The API implements the receiving side of Nextflow's own Tower/Seqera
+  Platform protocol — no post-hoc log/trace parsing.
+- **`lineage {}`** (built into Nextflow core, `lineage.enabled = true`) records
+  input/output file paths per task to a local store, read after the run by
+  [`lineage-import`](lineage-import/) to compute and submit a SHA-256 of each
+  file's content (`nf-lineage`'s own checksum is a metadata hash, not content).
+- **`nf-co2footprint`** (optional plugin), read after the run by
+  [`co2-import`](co2-import/) — see below.
 
 **Components:**
-
-- **GW RePO API** *(port 80)* — FastAPI backend with REST endpoints
-- **PostgreSQL Database** *(port 5432)* — Persistent storage for workflows, processes, ML models
-- **ML Resource Models** — Per-process Bayesian Ridge predictors with uncertainty estimation (memory, time, CPU)
-- **Streamlit UI App** *(port 8501)* — 3-page analytics dashboard
+- **GW RePO API** - FastAPI backend (port 80)
+- **PostgreSQL Database** - Workflow execution data (port 5432)
+- **ML Resource Models** - Gradient Boosting predictors
+- **Streamlit UI App** - Analytics dashboard (port 8501)
 
 **Runs entirely on your machine:**
 - ✅ Private: All data stays local
@@ -83,73 +73,87 @@ docker compose up -d
 
 ## Submit Workflow Data
 
-### 1. Configure Nextflow
+No plugin to install. Copy [`gwrepo.config`](gwrepo.config) into your pipeline (or
+`-c gwrepo.config`), fill in your institute / data-size tag / API key, and run:
 
-Add to `nextflow.config`:
+```bash
+export GWREPO_API_KEY=<your API_KEY from .env>
+nextflow run <pipeline> -c gwrepo.config
+```
+
+Once the run finishes, `submit_run.py` runs both post-run importers (file
+provenance + CO2) in one command. It declares its one dependency (`typer`) inline
+([PEP 723](https://peps.python.org/pep-0723/)), so with
+[`uv`](https://docs.astral.sh/uv/) installed there's no separate install step:
+
+```bash
+uv run submit_run.py --run-dir .
+```
+
+`--skip-co2` / `--skip-lineage` run just one (e.g. if `nf-co2footprint` wasn't
+enabled for this run); `--dry-run` previews without POSTing. See below for what
+each importer does, or run them individually.
+
+### 1. Live execution & resource metrics — `tower {}`
 
 ```groovy
-trace {
-    enabled = true
-    fields = 'hash,process,name,status,duration,cpus,time,disk,memory,realtime,%cpu,%mem,peak_rss,peak_vmem,rchar,wchar'
+tower {
+    enabled     = true
+    endpoint    = 'http://localhost:80/DKFZ/mixed'   // GW-RePO API base URL + /<institute>/<dataSizeTag>
+    accessToken = secrets.GWREPO_API_KEY             // or the GWREPO_API_KEY env var; any non-empty string
 }
 ```
 
-### 2. Run Client
+This is Nextflow's own built-in Tower/Seqera Platform client — the API implements
+the receiving side of that protocol. Streamed live, as the run proceeds:
 
-```bash
-export API_KEY=<your-key-from-.env>
-python client/client.py <pipeline_info_dir> --work-dir <work_dir>
+**Workflow** (`/trace/create`, `/begin`, `/complete`): run name, Nextflow version,
+revision, start time, duration, final state.
+
+**Per task** (`/trace/{id}/progress`, `/heartbeat`): process name, module, container,
+exit status, requested vs. actual CPU / memory / time / disk, `%cpu`, `%mem`,
+`peak_rss`, `peak_vmem`, `rchar` / `wchar`, `read_bytes` / `write_bytes`, realtime,
+queue.
+
+### 2. File provenance — `lineage {}` + `lineage-import`
+
+```groovy
+lineage {
+    enabled = true
+}
 ```
 
-### 3. What Gets Extracted
+```bash
+nextflow run <pipeline> -c gwrepo.config && python lineage-import/submit_lineage.py
+```
 
-**From execution trace (`execution_trace_*.txt`):**
-- `process_name` - Full process identifier
-- `duration` - Actual runtime (seconds)
-- `cpus_requested` - Requested CPU cores
-- `memory_requested` - Requested memory
-- `time_requested` - Requested time limit
-- `disk_requested` - Requested disk space
-- `percent_cpu` - Actual CPU utilization (%)
-- `percent_memory` - Actual memory utilization (%)
-- `peak_rss` - Peak resident memory (MB)
-- `peak_vmem` - Peak virtual memory (MB)
-- `rchar` - Characters read (bytes)
-- `wchar` - Characters written (bytes)
-- `realtime` - Wall clock time
+Input and output file paths per task, each with a SHA-256 of its content — computed
+by the importer itself after the run (`nf-lineage`'s own checksum is a metadata hash,
+not content). See [`lineage-import/README.md`](lineage-import/README.md).
 
-**From work directory scanning (`--work-dir`):**
-- `disk_usage_mb` - Total disk space used by task (MB)
-- `read_bytes` - Bytes read from disk during execution
-- `write_bytes` - Bytes written to disk during execution
-- `peak_vmem_mb` - Peak virtual memory from procfs (MB)
-- `peak_rss_mb` - Peak resident memory from procfs (MB)
+### 3. CO2 footprint (optional)
 
-**From BCO provenance (`manifest_*.bco.json`):** *(optional)*
-- Input file paths and hashes
-- Output file paths and hashes
-- Parameter inputs
-- Workflow structure
+CO2 and energy data comes from the [`nf-co2footprint`](https://nextflow-io.github.io/nf-co2footprint/)
+plugin, imported after the run by a small script (`nf-co2footprint` writes its files
+during Nextflow shutdown, too late to read live):
+
+```groovy
+plugins {
+    id 'nf-co2footprint'
+}
+co2footprint {
+    location = 'DE'
+    summary { enabled = true }   // needed for the car-km / tree-sequestration figures
+}
+```
+
+```bash
+nextflow run <pipeline> -c gwrepo.config && python co2-import/submit_co2.py
+```
+
+See [`co2-import/README.md`](co2-import/README.md).
 
 **Privacy:** File paths are stored for provenance only. ML models use numerical metrics only.
-
-### Module Name Normalization
-
-Process names are automatically normalized using nf-core module cache:
-
-**Examples:**
-- `BCFTOOLS_REHEADER_1`, `BCFTOOLS_REHEADER_2` → `BCFTOOLS_REHEADER`
-- `BCFTOOLS_REHEADER_TP_BASE` → `BCFTOOLS_REHEADER`
-- `TABIX_TABIX_2` → `TABIX_TABIX`
-- `BCFTOOLS_FILTER_QUERY_FP` → `BCFTOOLS_FILTER`
-
-**Benefits:**
-- ✅ Consistent naming across all views
-- ✅ Aggregates metrics from multiple runs with different suffixes
-- ✅ ML models trained on consolidated data per module
-- ✅ Cleaner optimization recommendations
-
-**Migration:** Run `python scripts/migrate_normalize_modules.py` to normalize existing data.
 
 ## View Dashboard
 
@@ -161,22 +165,7 @@ Open http://localhost:8501
 
 ### Dashboard Pages
 
-#### 1. Workflow Summaries
-
-Overview of workflow-level execution metrics and visualizations
-
-- Total workflow runs count
-- Workflow execution table with key metrics
-- Visualizations:
-  - Workflow status distribution (pie chart)
-  - Duration distribution (histogram)
-  - Duration over time (line chart)
-  - Data size tag distribution (bar chart)
-  - Duration by data size tag (box plot)
-
----
-
-#### 2. Analytics & Dashboard
+#### 1. Dashboard
 
 Combined view for process-level analytics and execution metrics
 
@@ -188,8 +177,14 @@ Combined view for process-level analytics and execution metrics
 - CPU utilization distribution (box plots)
 - Disk I/O & storage metrics
 
-**Analytics Tab:**
-- Correlation plots per process:
+---
+
+#### 2. Analytics
+
+Helps to understand resource patterns per process and identification of bottlenecks
+
+- Select process from dropdown
+- Correlation plots:
   - Memory vs Disk Size (with R² correlation)
   - CPU Cores Used vs Disk Size
   - Duration vs Disk Size
@@ -204,43 +199,62 @@ Combined view for process-level analytics and execution metrics
 
 ---
 
-#### 3. Bayesian Modelling
+#### 3. ML Training
 
-Train Bayesian models and get ML-powered recommendations with uncertainty estimates
+Train resource prediction models here
 
-**Training Tab:**
-- Train Bayesian Ridge models on your historical data
-- Set resource limits (max CPUs, memory, duration per task)
-- View training results:
-  - Processes with trained models
-  - Processes needing more data (<10 samples)
-- Enhanced features for better CPU scaling:
-  - Log-scaled data size
-  - CPU-data interaction terms
-  - I/O per CPU ratio
-  - Memory-CPU balance
+- Train Gradient Boosting models on your historical data
+- View model performance metrics:
+  - R² score (variance explained)
+  - RMSE (root mean square error)
+  - MAE (mean absolute error)
+  - Cross-validation scores
+- Feature importance rankings (which features matter most)
+- Model artifacts stored in `/code/models/`
 
-**Optimizations Tab:**
-- Interactive resource optimizer with uncertainty estimates
-- Select process and enter data size with visual ruler
-- See historical range and your position
-- Get predictions with:
-  - 95% confidence intervals
-  - Coefficient of variation (CV) for uncertainty
-  - Dynamic safety margins based on uncertainty
-- Visualize predictions with uncertainty plots
-- Resource limits enforcement (from training tab)
-- Download Nextflow config
+**Requirements:** Minimum 10 samples per process for per-process models
 
-**Bulk Optimizations Tab:**
-- Generate configs for ALL trained processes at once
-- Choose data size strategy:
-  - Use historical average per process
-  - Use historical maximum per process
-  - Custom size (same for all)
-- Priority modes: balanced, cost, performance
-- Sanity caps prevent absurd predictions
-- Download combined Nextflow config
+---
+
+#### 4. ML Predictions
+Get resource recommendations for a specific process before running your new analysis
+- Enter process name (e.g., `BCFTOOLS_FILTER`)
+- Get predictions for SMALL, MEDIUM, LARGE dataset scenarios
+- Predictions include:
+  - Memory (MB) with P95 safety margin
+  - CPU cores with P95 safety margin
+  - Duration (seconds) with P95 safety margin
+- Auto-generated Nextflow config snippet
+- Download ready-to-use config file
+- Shows if prediction uses per-process model or fallback
+
+---
+
+#### 5. Optimization
+Get data-driven recommendations for all processes
+
+**Features:**
+- Lists all processes with historical data
+- For each process:
+  - Historical statistics (mean, std, min, max, median, P95, P99)
+  - Recommended configuration (P95-based)
+  - Process insights (CPU-bound, I/O-bound, etc.)
+  - Energy and CO2 analysis (if available)
+  - 3 scenario predictions (SMALL/MEDIUM/LARGE)
+  - `is_fallback_model` flag (true if <10 samples)
+- Filter by institute
+
+---
+
+#### 6. Model Performance
+Monitor trained model quality before trusting predictions
+
+- List all trained models (memory, time, CPU per process)
+- Accuracy metrics comparison
+- Feature importance visualizations
+- Training sample counts
+- Model timestamps
+- Delete/retrain individual models
 
 ---
 
@@ -379,3 +393,10 @@ All settings in `.env`:
 ---
 
 **Full documentation**: `doc/README.md`
+
+## AI-assisted development
+
+Parts of this codebase were written with AI coding assistants. All 
+contributions were reviewed, tested and are maintained by the 
+authors listed in CITATION.cff, who are solely responsible for the 
+correctness of the code. No AI system is credited as an author.
