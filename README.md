@@ -13,11 +13,11 @@ docker compose up -d
 
 ```
 ┌──────────────────────────────────────────────┐
-│           Nextflow Pipeline Execution         │
-│   ┌──────────────────────────────────────┐    │
-│   │   tower {} — Nextflow's own core      │    │
-│   │   Tower/Seqera-Platform HTTP client   │    │
-│   └──────────────────────────────────────┘    │
+│           Nextflow Pipeline Execution        │
+│   ┌──────────────────────────────────────┐   │
+│   │   tower {} — Nextflow's own core     │   │
+│   │   Tower/Seqera-Platform HTTP client  │   │
+│   └──────────────────────────────────────┘   │
 └───────────────────────┬──────────────────────┘
                         │  live, as the run proceeds
                         ▼  (HTTP POST/PUT / Bearer or Basic auth)
@@ -167,13 +167,15 @@ Open http://localhost:8501
 
 #### 1. Dashboard
 
-Enables quick overview of all workflow executions and, find resource-heavy processes
+Combined view for process-level analytics and execution metrics
 
+**Dashboard Tab:**
 - Process resource utilization charts (CPU%, memory%, duration)
 - Filter by process name
 - Historical execution table with all metrics
-- Generate optimized Nextflow config based on historical P95 values
-- Download detailed process data as CSV
+- Summary statistics by process
+- CPU utilization distribution (box plots)
+- Disk I/O & storage metrics
 
 ---
 
@@ -194,7 +196,6 @@ Helps to understand resource patterns per process and identification of bottlene
   - **I/O-Intensive**: I/O intensity > 5×
   - **Compute-Intensive**: I/O intensity < 0.5×
 - Toggle log scale for better visualization
-
 
 ---
 
@@ -261,26 +262,34 @@ Monitor trained model quality before trusting predictions
 
 ### Algorithm
 
-**Model:** Gradient Boosting Regressor (sklearn)
+**Model:** Bayesian Ridge Regression (sklearn)
 
-**Why Gradient Boosting:**
-- Handles non-linear relationships (resource usage vs data size)
-- Robust to outliers (some runs are anomalies)
-- Provides feature importance (interpretability)
-- Works well with tabular data (our feature set)
+**Why Bayesian Ridge:**
+- Provides uncertainty estimates (CV, confidence intervals)
+- Handles small datasets with scenario-based priors
+- Dynamic safety margins based on uncertainty
+- Better extrapolation beyond training data
+- Per-process models with automatic regularization
 
 **Training:**
-- 80/20 train/test split
-- 5-fold cross-validation
+- Scenario-based priors:
+  - ≥30 runs: weak priors (data-driven)
+  - 10-30 runs: moderate priors
+  - <10 runs: strong regularization
 - StandardScaler for feature normalization
-- Models saved as `.pkl` files
+- Models saved as `_bayesian.pkl` files
 
 **Prediction:**
-- P95 safety margin (15% buffer for memory/time)
-- Minimum 1 hour for time predictions
-- CPU rounded to nearest core (1-32 range)
+- 95% confidence intervals for all predictions
+- Coefficient of variation (CV) for uncertainty
+- Dynamic safety margins:
+  - CV < 10%: 5% margin (high confidence)
+  - CV 10-20%: 15% margin (medium confidence)
+  - CV > 20%: 30% margin (low confidence)
+- Minimum 1 core for CPU, 256 MB for memory, 1 hour for time
+- User-provided resource limits enforced as hard caps
 
-### Features Used (13 total)
+### Features Used (14 total)
 
 | Feature | Description | Why It Matters |
 |---------|-------------|----------------|
@@ -297,18 +306,37 @@ Monitor trained model quality before trusting predictions
 | `memory_per_gb` | Memory efficiency (MB per GB data) | Normalized memory usage |
 | `time_per_gb` | Time efficiency (sec per GB data) | Normalized runtime |
 | `cpu_per_gb` | CPU efficiency (cores per GB data) | Normalized CPU usage |
+| `log_disk_gb` | Log-scaled data size | Captures diminishing returns |
+| `disk_cpu_interaction` | CPU × data size | Explicit scaling relationship |
+| `io_per_cpu` | I/O per core | I/O pressure per CPU |
+| `memory_cpu_ratio` | Memory/CPU balance | Resource balance indicator |
 
-### Per-Process vs Fallback Models
+### Per-Process Models
 
-**Per-process model:** Trained on ≥10 samples of the same process (e.g., `BCFTOOLS_FILTER`)
-
-**Fallback model:** Used when <10 samples, trained on ALL processes combined
+**Each process gets its own model** trained only on its historical data:
+- Automatically uses normalized process names (e.g., `BCFTOOLS_FILTER`)
+- Aggregates runs from all variants (`_1`, `_2`, etc.)
+- Strong priors for processes with <10 samples prevent overfitting
+- No fallback model needed - Bayesian priors handle low-sample cases
 
 **How it works:**
 ```
-Process has 24 samples? → Use BCFTOOLS_FILTER model ✅
-Process has 3 samples?  → Use fallback model ⚠️
+BCFTOOLS_FILTER has 24 samples? → Train BCFTOOLS_FILTER model ✅
+BCFTOOLS_FILTER has 3 samples?  → Strong priors, still train ✅
 ```
+
+### Resource Limits
+
+**Set workflow-level resource constraints:**
+- Max CPUs per task (default: 32)
+- Max memory per task (default: 128 GB)
+- Max duration per task (default: 24 hours)
+
+**Enforcement:**
+- Applied as hard caps on all predictions
+- Prevents absurd extrapolation (e.g., 816 CPUs, 11 TB memory)
+- Configurable per workflow in ML Training tab
+- Optional override per prediction in Optimizations tab
 
 ## API Endpoints
 

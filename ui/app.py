@@ -21,7 +21,7 @@ with st.sidebar:
     st.subheader("Navigation")
     page = st.selectbox(
         "Select page",
-        ["Workflow Summaries", "Dashboard", "Analytics", "ML Training", "Optimizations", "Model Performance"],
+        ["Workflow Summaries", "Analytics & Dashboard", "Bayesian Modelling"],
         index=0,
         label_visibility="collapsed"
     )
@@ -667,10 +667,8 @@ def render_analytics():
 def render_ml_training():
     st.title("🤖 ML Training - Build Prediction Models")
     st.write("""
-    **Step 2: Train ML Models**
-    
     After reviewing your historical data in the Dashboard, train ML models to learn resource usage patterns. 
-    These models will enable predictions for small, medium, and large dataset scenarios.
+    These models will enable predictions a range size of dataset scenarios.
     """)
     
     if not API_KEY:
@@ -695,6 +693,43 @@ def render_ml_training():
     with col1:
         st.subheader("Training Configuration")
         
+        # Resource Limits Input
+        st.subheader("🔒 Resource Limits (Per Task)")
+        st.info("Maximum resources any single task can use (from your Nextflow config)")
+        
+        max_cpus = st.number_input(
+            "Max CPUs",
+            min_value=1,
+            max_value=128,
+            value=32,
+            help="process.cpus in Nextflow config - Maximum CPUs any task can request"
+        )
+        
+        max_memory_gb = st.number_input(
+            "Max Memory (GB)",
+            min_value=0.1,
+            max_value=1024.0,
+            value=128.0,
+            step=0.1,
+            help="process.memory in Nextflow config - Maximum memory any task can request"
+        )
+        
+        max_duration_hours = st.number_input(
+            "Max Duration (hours)",
+            min_value=0.1,
+            max_value=720.0,
+            value=24.0,
+            step=0.1,
+            help="process.time in Nextflow config - Maximum runtime any task can have"
+        )
+        
+        # Store in session state for training
+        st.session_state['resource_limits'] = {
+            'max_cpus': max_cpus,
+            'max_memory_mb': max_memory_gb * 1024,
+            'max_duration_sec': int(max_duration_hours * 3600)
+        }
+        
         if st.button("Start Training", type="primary", use_container_width=True):
             with st.spinner("Training models... This may take a minute."):
                 headers = {
@@ -702,10 +737,13 @@ def render_ml_training():
                     "Content-Type": "application/json"
                 }
                 try:
+                    # Include resource limits in training request
                     response = requests.post(
                         f"{API_BASE_URL}/ml/train",
                         headers=headers,
-                        json={}
+                        json={
+                            'resource_limits': st.session_state.get('resource_limits', {})
+                        }
                     )
                     
                     if response.status_code == 200:
@@ -785,146 +823,724 @@ def fetch_all_optimizations(api_key_val):
 
 
 def render_optimizations():
-    st.title("⚡ Resource Optimizations - ML-Based Configurations")
+    """
+    Interactive resource optimizer with user-specified data size.
+    REPLACES old S/M/L scenario-based optimizations page.
+    """
+    st.title("🎯 Interactive Resource Optimizer")
     st.write("""
-    **Get optimized configurations for individual processes OR download all**
+    **Get optimized Nextflow config for your specific data size**
     
-    ML models predict resources for small, medium, and large dataset sizes.
-    Select a process from dropdown to view predictions, or download all configs.
+    Enter your expected input data size and get precise resource recommendations with uncertainty estimates.
     """)
     
     if not API_KEY:
         st.warning("Please enter your API key in the sidebar to authenticate.")
         return
     
-    # Refresh button
-    col_refresh1, col_refresh2 = st.columns([4, 1])
-    with col_refresh1:
-        st.write("**Tip:** Click refresh to reload latest predictions from API")
-    with col_refresh2:
-        if st.button("🔄 Refresh", use_container_width=True):
-            fetch_all_optimizations.clear()
-            st.rerun()
+    # 1. Select process (uses EXISTING normalized names)
+    st.subheader("1️⃣ Select Process")
     
-    # Fetch all optimizations
-    with st.spinner("Loading ML predictions for all processes..."):
-        all_opts = fetch_all_optimizations(API_KEY)
+    # Fetch available processes with trained models
+    process_names = []
+    headers = {"Authorization": f"Bearer {API_KEY}"}
     
-    if not all_opts or not all_opts.get('success'):
-        st.error("Failed to fetch optimizations. Train models first on ML Training tab.")
-        return
+    # Primary: Get processes that have been trained (from ML optimizations endpoint)
+    try:
+        response = requests.get(f"{API_BASE_URL}/ml/optimizations", headers=headers, timeout=10)
+        if response.status_code == 200:
+            opts_data = response.json()
+            if opts_data.get('success'):
+                optimizations = opts_data.get('optimizations', [])
+                process_names = sorted([opt.get('module_name') for opt in optimizations if opt.get('module_name')])
+    except Exception:
+        pass
     
-    optimizations = all_opts.get('optimizations', [])
+    # Fallback: extract from raw process data
+    if not process_names:
+        try:
+            response = requests.get(f"{API_BASE_URL}/processes/", headers=headers, timeout=10)
+            if response.status_code == 200:
+                processes_data = response.json()
+                if isinstance(processes_data, list):
+                    module_names = set()
+                    for proc in processes_data:
+                        if isinstance(proc, dict) and proc.get('module_name'):
+                            module_names.add(proc['module_name'])
+                    process_names = sorted(module_names)
+        except Exception:
+            pass
     
-    if not optimizations:
-        st.info("No optimizations available. Submit workflow data and train models.")
-        return
+    # Show count if processes found
+    if process_names:
+        st.write(f"✓ Found **{len(process_names)}** processes with trained models")
     
-    # ============================================
-    # DROPDOWN TO SELECT PROCESS
-    # ============================================
-    st.subheader("🔍 Select Process to View Predictions")
+    selected_process = st.selectbox(
+        "Choose a process:",
+        options=process_names,
+        help="Select the workflow process to optimize"
+    )
     
-    process_names = [opt.get('module_name', 'unknown') for opt in optimizations]
-    selected_process = st.selectbox("Choose a process:", options=process_names)
-    
+    # Show historical data summary
     if selected_process:
-        selected_opt = next((opt for opt in optimizations if opt.get('module_name') == selected_process), None)
-        
-        if selected_opt:
-            scenarios = selected_opt.get('scenarios', {})
-            samples = selected_opt.get('historical_samples', 0)
-            
-            st.write(f"**Historical Runs:** {samples}")
-            
-            # Show warnings if any scenarios were skipped
-            warnings = scenarios.get('_warnings', {})
-            if warnings:
-                for warning_key, warning_msg in warnings.items():
-                    st.warning(f"⚠️ {warning_msg}")
-            
-            col_s, col_m, col_l = st.columns(3)
-            
-            size_names = ['SMALL', 'MEDIUM', 'LARGE']
-            for i, size_name in enumerate(size_names):
-                cfg = scenarios.get(size_name, {})
-                if cfg:  # Only show if scenario exists
-                    with [col_s, col_m, col_l][i]:
-                        st.write(f"**{size_name} Dataset**")
-                        st.write(f"Data Size: ~{cfg.get('disk_size_mb', 0):.1f} MB")
-                        st.write(f"**CPUs:** {cfg.get('cpus', 1)}")
-                        st.write(f"**Memory:** {cfg.get('memory', 'N/A')}")
-                        st.write(f"**Time:** {cfg.get('time', 'N/A')}")
+        try:
+            # Get process history
+            response = requests.get(
+                f"{API_BASE_URL}/ml/optimization/{selected_process}",
+                headers=headers
+            )
+            if response.status_code == 200:
+                hist_data = response.json()
+                samples = hist_data.get('historical_samples', 0)
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Historical Runs", samples)
+                with col2:
+                    if samples >= 10:
+                        st.success("✅ Sufficient data")
+                    else:
+                        st.warning(f"⚠️ Need {10-samples} more")
+                
+                # Get historical size range
+                hist_min = hist_data.get('historical_size_range_gb', {}).get('min', 0)
+                hist_max = hist_data.get('historical_size_range_gb', {}).get('max', 0)
+                
+                # Choose appropriate unit
+                if hist_max < 0.1:
+                    unit = 'MB'
+                    hist_min_disp = hist_min * 1000
+                    hist_max_disp = hist_max * 1000
+                elif hist_max < 1000:
+                    unit = 'GB'
+                    hist_min_disp = hist_min
+                    hist_max_disp = hist_max
                 else:
-                    # Scenario not available
-                    with [col_s, col_m, col_l][i]:
-                        st.write(f"**{size_name} Dataset**")
-                        st.warning("⚠️ Not available")
-                        st.write("Insufficient historical data variation")
+                    unit = 'TB'
+                    hist_min_disp = hist_min / 1000
+                    hist_max_disp = hist_max / 1000
+                
+                with col3:
+                    if hist_max_disp > 0:
+                        st.metric(f"Historical Range", f"{hist_min_disp:.2f} - {hist_max_disp:.2f} {unit}")
+                    else:
+                        st.metric(f"Historical Range", "N/A")
+                    
+        except Exception as e:
+            pass
     
     st.divider()
     
-    # ============================================
-    # DOWNLOAD CONFIG FILES (ONLY AVAILABLE SCENARIOS)
-    # ============================================
-    st.subheader("📥 Download All Configurations")
+    # 2. Your Data - with integrated historical range ruler
+    st.subheader("2️⃣ Your Data")
     
-    import io
+    # Get historical range from API
+    hist_min_gb = hist_data.get('historical_size_range_gb', {}).get('min', 0) if selected_process and hist_data else 0
+    hist_max_gb = hist_data.get('historical_size_range_gb', {}).get('max', 0) if selected_process and hist_data else 0
     
-    # Check which scenarios are available across all processes
-    available_sizes = []
-    size_labels = {'SMALL': 'SMALL', 'MEDIUM': 'MEDIUM', 'LARGE': 'LARGE'}
-    
-    # Count how many processes have each scenario
-    size_counts = {'SMALL': 0, 'MEDIUM': 0, 'LARGE': 0}
-    for opt in optimizations:
-        scenarios = opt.get('scenarios', {})
-        for size in ['SMALL', 'MEDIUM', 'LARGE']:
-            if scenarios.get(size):
-                size_counts[size] += 1
-    
-    st.write(f"**Scenario availability:** SMALL: {size_counts['SMALL']}/{len(optimizations)} | MEDIUM: {size_counts['MEDIUM']}/{len(optimizations)} | LARGE: {size_counts['LARGE']}/{len(optimizations)}")
-    
-    config_cols = st.columns(3)
-    
-    # Generate configs for each available size
-    for idx, size_name in enumerate(['SMALL', 'MEDIUM', 'LARGE']):
-        config_lines = [
-            f"// Auto-generated Nextflow configuration",
-            f"// {size_name} dataset scenario",
-            f"// {len(optimizations)} processes ({size_counts[size_name]} with predictions)",
-            "process {"
-        ]
+    if hist_max_gb > 0 and hist_max_gb >= hist_min_gb:
+        # Choose appropriate unit based on data size
+        if hist_max_gb < 0.1:  # < 100 MB - use MB
+            slider_unit = 'MB'
+            slider_min = max(0.01, hist_min_gb * 1000 * 0.5)
+            slider_max = hist_max_gb * 1000 * 2  # 2x max for extrapolation
+            slider_default = min(hist_max_gb * 1000, slider_max)
+            slider_step = 0.1
+        elif hist_max_gb < 10:  # 100 MB - 10 GB - use GB
+            slider_unit = 'GB'
+            slider_min = max(0.001, hist_min_gb * 0.5)
+            slider_max = hist_max_gb * 2  # 2x max for extrapolation
+            slider_default = min(hist_max_gb, slider_max)
+            slider_step = 0.01
+        elif hist_max_gb < 1000:  # 10 GB - 1 TB - use GB
+            slider_unit = 'GB'
+            slider_min = max(0.01, hist_min_gb * 0.5)
+            slider_max = hist_max_gb * 2  # 2x max for extrapolation
+            slider_default = min(hist_max_gb, slider_max)
+            slider_step = 0.1
+        else:  # > 1 TB - use TB
+            slider_unit = 'TB'
+            slider_min = max(0.001, hist_min_gb / 1000 * 0.5)
+            slider_max = hist_max_gb / 1000 * 2  # 2x max for extrapolation
+            slider_default = min(hist_max_gb / 1000, slider_max)
+            slider_step = 0.01
         
-        for opt in optimizations:
-            module = opt.get('module_name', 'unknown')
-            scenarios = opt.get('scenarios', {})
-            cfg = scenarios.get(size_name, {})
+        st.write(f"**Historical data range:** {hist_min_gb*1000:.2f} MB - {hist_max_gb*1000:.2f} MB")
+        
+        # Interactive slider
+        expected_size_input = st.slider(
+            f"Expected input data size ({slider_unit})",
+            min_value=float(slider_min),
+            max_value=float(slider_max),
+            value=float(slider_default),
+            step=float(slider_step),
+            help=f"Drag to select your data size. Blue area shows historical range."
+        )
+        
+        # Convert to GB for API
+        if slider_unit == 'MB':
+            expected_size_gb = expected_size_input / 1000
+        elif slider_unit == 'TB':
+            expected_size_gb = expected_size_input * 1000
+        else:
+            expected_size_gb = expected_size_input
+        
+        # Calculate positions for ruler visualization
+        if slider_unit == 'MB':
+            hist_min_vis = hist_min_gb * 1000
+            hist_max_vis = hist_max_gb * 1000
+        elif slider_unit == 'TB':
+            hist_min_vis = hist_min_gb / 1000
+            hist_max_vis = hist_max_gb / 1000
+        else:
+            hist_min_vis = hist_min_gb
+            hist_max_vis = hist_max_gb
+        
+        total_range = slider_max - slider_min
+        hist_start_pct = max(0, min(100, (hist_min_vis - slider_min) / total_range * 100))
+        hist_end_pct = max(0, min(100, (hist_max_vis - slider_min) / total_range * 100))
+        user_pct = max(0, min(100, (expected_size_input - slider_min) / total_range * 100))
+        
+        # Is user extrapolating?
+        is_extrapolating = expected_size_gb < hist_min_gb or expected_size_gb > hist_max_gb
+        marker_color = '#f44336' if is_extrapolating else '#4CAF50'
+        
+        # Visual ruler HTML - calculate positions in Python (not CSS calc)
+        hist_bar_width = max(0, hist_end_pct - hist_start_pct)
+        # Convert percentages to actual positions (5% padding on each side, so usable area is 90%)
+        hist_left_pos = 5 + (hist_start_pct * 0.9)
+        hist_width_pos = hist_bar_width * 0.9
+        user_left_pos = 5 + (user_pct * 0.9)
+        
+        ruler_html = f"""
+        <div style="position: relative; width: 100%; height: 80px; margin: 15px 0; background: #f8f9fa; border-radius: 8px; padding: 10px;">
+            <!-- Scale bar -->
+            <div style="position: absolute; bottom: 15px; left: 5%; width: 90%; height: 4px; background: #ddd; border-radius: 2px;"></div>
             
-            if cfg:  # Use ML prediction if available
-                config_lines.append(f"    withName: '{module}' {{")
-                config_lines.append(f"        cpus = {cfg.get('cpus', 1)}")
-                config_lines.append(f"        memory = '{cfg.get('memory', '256 MB')}'")
-                config_lines.append(f"        time = '{cfg.get('time', '1h')}'")
-                config_lines.append("    }")
-            # Skip processes without this scenario
+            <!-- Historical range (blue highlight) -->
+            <div style="position: absolute; bottom: 13px; left: {hist_left_pos:.1f}%; width: {hist_width_pos:.1f}%; height: 8px; background: linear-gradient(90deg, #64B5F6, #1976D2); border-radius: 4px; opacity: 0.7;"></div>
+            
+            <!-- User position marker -->
+            <div style="position: absolute; bottom: 20px; left: {user_left_pos:.1f}%; transform: translateX(-50%); z-index: 10;">
+                <div style="width: 0; height: 0; border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 10px solid {marker_color}; margin: 0 auto;"></div>
+                <div style="width: 4px; height: 20px; background: {marker_color}; margin: -2px auto 0;"></div>
+                <div style="color: {marker_color}; font-weight: bold; font-size: 11px; text-align: center; margin-top: 2px;">You</div>
+            </div>
+            
+            <!-- Labels -->
+            <div style="position: absolute; bottom: 40px; left: 0%; font-size: 10px; color: #666; font-weight: bold;">
+                {slider_min:.2f} {slider_unit}
+            </div>
+            <div style="position: absolute; bottom: 40px; right: 0%; font-size: 10px; color: #666; font-weight: bold;">
+                {slider_max:.2f} {slider_unit}
+            </div>
+            <div style="position: absolute; bottom: 40px; left: 50%; transform: translateX(-50%); font-size: 11px; color: #1976D2; font-weight: bold; white-space: nowrap;">
+                📊 Historical: {hist_min_vis:.2f} - {hist_max_vis:.2f} {slider_unit}
+            </div>
+        </div>
+        """
+        st.html(ruler_html)
         
-        config_lines.append("}")
-        config_text = "\n".join(config_lines)
-        
-        with config_cols[idx]:
-            if size_counts[size_name] > 0:
-                st.download_button(
-                    label=f"⬇️ {size_name}.config ({size_counts[size_name]})",
-                    data=config_text,
-                    file_name=f"{size_name.lower()}.config",
-                    mime="text/plain",
-                    use_container_width=True
-                )
+        # Validation message
+        if is_extrapolating:
+            if expected_size_gb < hist_min_gb:
+                st.warning(f"⚠️ **Below historical range** - Your input ({expected_size_gb:.4f} GB) is below the minimum observed ({hist_min_gb:.4f} GB). Predictions may be less accurate.")
             else:
-                st.info(f"ℹ️ {size_name}.config\nNot available\n(Insufficient data)")
+                st.warning(f"⚠️ **Above historical range** - Your input ({expected_size_gb:.4f} GB) is above the maximum observed ({hist_max_gb:.4f} GB). Predictions may be less accurate.")
+        else:
+            st.success(f"✅ **Within historical range** - Your input ({expected_size_gb:.4f} GB) is within the observed range ({hist_min_gb:.4f} - {hist_max_gb:.4f} GB)")
+    else:
+        # No historical range data - use simple number input
+        expected_size_gb = st.number_input(
+            "Expected input data size (GB)",
+            min_value=0.001,
+            max_value=10000.0,
+            value=50.0,
+            step=0.1,
+            help="Enter your expected data size in GB"
+        )
+
     
-    st.info(f"Each file contains ALL {len(optimizations)} processes for that dataset size.")
+    # 3. Priority selection
+    st.subheader("3️⃣ Optimization Priority")
+    
+    priority = st.radio(
+        "Select optimization strategy:",
+        options=["balanced", "cost", "performance"],
+        horizontal=True,
+        help="Balanced: Dynamic safety margins based on uncertainty | "
+             "Cost: Minimize resources (accept higher risk) | "
+             "Performance: Maximize resources (avoid slowdowns)"
+    )
+    
+    priority_help = {
+        "balanced": "🎯 Dynamic safety margins based on model uncertainty (recommended)",
+        "cost": "💰 Tighter allocations (50% safety reduction) - higher risk of OOM",
+        "performance": "🚀 Conservative allocations (20% safety increase) - avoid slowdowns"
+    }
+    st.info(priority_help[priority])
+    
+    # Optional: Override resource limits for this prediction
+    st.divider()
+    st.subheader("🔒 Resource Limits Override (Optional)")
+    use_custom_limits = st.checkbox(
+        "Use custom limits for this prediction (overrides training defaults)",
+        help="If checked, these limits will be used instead of the defaults from ML Training"
+    )
+    
+    if use_custom_limits:
+        col_rl1, col_rl2, col_rl3 = st.columns(3)
+        with col_rl1:
+            override_max_cpus = st.number_input(
+                "Max CPUs",
+                min_value=1,
+                max_value=128,
+                value=32,
+                key="override_cpus"
+            )
+        with col_rl2:
+            override_max_memory_gb = st.number_input(
+                "Max Memory (GB)",
+                min_value=0.1,
+                max_value=1024.0,
+                value=128.0,
+                step=0.1,
+                key="override_memory"
+            )
+        with col_rl3:
+            override_max_duration_hours = st.number_input(
+                "Max Duration (hours)",
+                min_value=0.1,
+                max_value=720.0,
+                value=24.0,
+                step=0.1,
+                key="override_duration"
+            )
+        
+        resource_limits_payload = {
+            'max_cpus': override_max_cpus,
+            'max_memory_mb': override_max_memory_gb * 1024,
+            'max_duration_sec': int(override_max_duration_hours * 3600)
+        }
+    else:
+        # Use defaults from ML Training tab
+        resource_limits_payload = st.session_state.get('resource_limits', {
+            'max_cpus': 32,
+            'max_memory_mb': 131072,
+            'max_duration_sec': 86400
+        })
+    
+    st.divider()
+    
+    # 4. Generate optimization
+    st.subheader("4️⃣ Generate Configuration")
+    
+    if st.button("🚀 Generate Optimized Config", type="primary"):
+        with st.spinner("Computing optimal resources with Bayesian prediction..."):
+            try:
+                # Call new API endpoint with resource limits
+                response = requests.post(
+                    f"{API_BASE_URL}/ml/optimize-for-size",
+                    headers=headers,
+                    json={
+                        "process_name": selected_process,
+                        "expected_disk_gb": expected_size_gb,
+                        "priority": priority,
+                        "resource_limits": resource_limits_payload
+                    }
+                )
+                
+                result = response.json()
+                
+                if result.get('success'):
+                    # Display warnings first (if any)
+                    if result.get('warnings'):
+                        for warning in result['warnings']:
+                            st.warning(f"⚠️ {warning}")
+                    
+                    st.success("✅ Optimization complete!")
+                    
+                    predictions = result['predictions']
+                    
+                    # Memory
+                    mem_pred = predictions['memory']
+                    st.subheader("💾 Memory")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("Model Prediction", 
+                                 f"{max(0, mem_pred['prediction']):.0f} MB",
+                                 help="Raw Bayesian model prediction")
+                        st.metric("With Safety Margin (+{:.0%})".format(mem_pred['safety_margin']), 
+                                 f"{max(256, mem_pred['final_with_safety']):.0f} MB",
+                                 help="Prediction + safety buffer (minimum 256 MB)")
+                    with col2:
+                        st.metric("Uncertainty (CV)", 
+                                 f"{mem_pred['cv']:.0%}",
+                                 help="Coefficient of variation - higher means less certain")
+                        st.metric("95% CI", 
+                                 f"[{max(0, mem_pred['confidence_interval']['lower']):.0f}, {mem_pred['confidence_interval']['upper']:.0f}] MB",
+                                 help="95% confidence interval")
+                    
+                    # Time
+                    time_pred = predictions['time']
+                    st.subheader("⏱️ Duration")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("Model Prediction", 
+                                 f"{max(0, time_pred['prediction']):.0f} sec ({max(0, time_pred['prediction'])/60:.1f} min)",
+                                 help="Raw Bayesian model prediction")
+                        st.metric("Nextflow Minimum", 
+                                 f"{time_pred['final_with_safety']:.0f} sec ({time_pred['final_with_safety']/3600:.1f} h)",
+                                 help="1 hour minimum enforced by Nextflow")
+                    with col2:
+                        st.metric("Uncertainty (CV)", 
+                                 f"{time_pred['cv']:.0%}",
+                                 help="Coefficient of variation - higher means less certain")
+                        st.metric("95% CI", 
+                                 f"[{max(0, time_pred['confidence_interval']['lower']):.0f}, {time_pred['confidence_interval']['upper']:.0f}] sec",
+                                 help="95% confidence interval")
+                    
+                    # CPU
+                    cpu_pred = predictions['cpu']
+                    st.subheader("💻 CPU Cores")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("Model Prediction", 
+                                 f"{max(0, cpu_pred['prediction']):.1f} cores",
+                                 help="Raw Bayesian model prediction")
+                        st.metric("With Safety Margin (+{:.0%})".format(cpu_pred['safety_margin']), 
+                                 f"{max(1, round(cpu_pred['final_with_safety']))} cores",
+                                 help="Prediction + safety buffer (minimum 1 core)")
+                    with col2:
+                        st.metric("Uncertainty (CV)", 
+                                 f"{cpu_pred['cv']:.0%}",
+                                 help="Coefficient of variation - higher means less certain")
+                        st.metric("95% CI", 
+                                 f"[{max(0, cpu_pred['confidence_interval']['lower']):.1f}, {cpu_pred['confidence_interval']['upper']:.1f}] cores",
+                                 help="95% confidence interval")
+                    
+                    # Nextflow config
+                    st.divider()
+                    st.subheader("📄 Nextflow Configuration")
+                    st.code(result['nextflow_config'], language='groovy')
+                    
+                    # Download button
+                    st.download_button(
+                        label="📥 Download nextflow.config",
+                        data=result['nextflow_config'],
+                        file_name=f"nextflow_{selected_process}_{expected_size_gb}GB.config",
+                        mime="text/plain"
+                    )
+                    
+                    # Visualization
+                    st.divider()
+                    st.subheader("📊 Prediction Uncertainty")
+                    
+                    # Plot confidence intervals across data size range
+                    import plotly.graph_objects as go
+                    import numpy as np
+                    
+                    # Get historical range for x-axis
+                    hist_min = result['historical_size_range_gb']['min']
+                    hist_max = result['historical_size_range_gb']['max']
+                    
+                    # Create range of data sizes to show trend
+                    if hist_max > hist_min:
+                        x_range = np.linspace(max(0.001, hist_min * 0.5), hist_max * 2, 50)
+                    else:
+                        x_range = np.linspace(0.001, expected_size_gb * 2, 50)
+                    
+                    # Calculate predictions for each data size (linear scaling)
+                    base_ratio = mem_pred['prediction'] / max(0.001, expected_size_gb)
+                    y_predictions = x_range * base_ratio
+                    
+                    # Calculate confidence interval bands (proportional)
+                    cv = mem_pred['cv']
+                    y_upper = y_predictions * (1 + 1.96 * cv)
+                    y_lower = y_predictions * (1 - 1.96 * cv)
+                    y_lower = np.maximum(y_lower, 0)  # No negative memory
+                    
+                    fig = go.Figure()
+                    
+                    # Confidence interval band
+                    fig.add_trace(go.Scatter(
+                        x=np.concatenate([x_range, x_range[::-1]]),
+                        y=np.concatenate([y_upper, y_lower[::-1]]),
+                        fill='toself',
+                        fillcolor='rgba(255, 0, 0, 0.2)',
+                        line=dict(color='rgba(0,0,0,0)'),
+                        name='95% Confidence Interval'
+                    ))
+                    
+                    # Prediction line
+                    fig.add_trace(go.Scatter(
+                        x=x_range,
+                        y=y_predictions,
+                        mode='lines',
+                        name='Prediction',
+                        line=dict(width=3, color='blue')
+                    ))
+                    
+                    # User's prediction point
+                    fig.add_trace(go.Scatter(
+                        x=[expected_size_gb],
+                        y=[mem_pred['prediction']],
+                        mode='markers',
+                        name='Your Prediction',
+                        marker=dict(size=15, color='green', line=dict(width=2, color='white'))
+                    ))
+                    
+                    # Historical range markers
+                    fig.add_vrect(x0=hist_min, x1=hist_max,
+                                 annotation_text="Historical Range",
+                                 annotation_position="top",
+                                 fillcolor="green", opacity=0.1, line_width=0)
+                    
+                    fig.update_layout(
+                        title=f"Memory Prediction vs Data Size (CV={cv:.0%})",
+                        xaxis_title="Data Size (GB)",
+                        yaxis_title="Memory (MB)",
+                        showlegend=True,
+                        hovermode='x unified'
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    st.caption(f"**Green dot**: Your prediction at {expected_size_gb} GB | **Blue line**: Model prediction | **Red band**: 95% confidence interval | **Green area**: Historical data range")
+                    
+                    # CPU Prediction Uncertainty Plot
+                    st.subheader("💻 CPU Prediction Uncertainty")
+                    
+                    # Get historical max CPU (this is the real plateau - tool's max parallelization)
+                    # Fetch from optimization endpoint which has cpu_utilization stats
+                    try:
+                        hist_response = requests.get(f"{API_BASE_URL}/ml/optimization/{selected_process}", headers=headers)
+                        if hist_response.status_code == 200:
+                            hist_details = hist_response.json()
+                            cpu_stats = hist_details.get('cpu_utilization', {})
+                            max_cpu_percent = cpu_stats.get('max', cpu_pred['prediction'] * 100)  # Default to prediction if not available
+                            max_cpu_cores = max(1, max_cpu_percent / 100)  # Convert percent to cores
+                        else:
+                            max_cpu_cores = cpu_pred['prediction'] * 1.5  # Fallback
+                    except Exception:
+                        max_cpu_cores = cpu_pred['prediction'] * 1.5  # Fallback
+                    
+                    cpu_cv = cpu_pred['cv']
+                    cpu_prediction = cpu_pred['prediction']
+                    
+                    # CPU scaling: linear within historical range, plateaus at observed max
+                    cpu_y_predictions = []
+                    for x in x_range:
+                        # Linear scaling based on prediction
+                        linear_cpu = x * (cpu_prediction / max(0.001, expected_size_gb))
+                        # Cap at observed maximum (tool's parallelization limit)
+                        cpu_y_predictions.append(min(linear_cpu, max_cpu_cores))
+                    
+                    cpu_y_predictions = np.array(cpu_y_predictions)
+                    cpu_y_upper = np.minimum(cpu_y_predictions * (1 + 1.96 * cpu_cv), max_cpu_cores * 1.1)  # Don't exceed max by much
+                    cpu_y_lower = np.maximum(cpu_y_predictions * (1 - 1.96 * cpu_cv), 1)  # Min 1 core
+                    
+                    fig_cpu = go.Figure()
+                    
+                    fig_cpu.add_trace(go.Scatter(
+                        x=np.concatenate([x_range, x_range[::-1]]),
+                        y=np.concatenate([cpu_y_upper, cpu_y_lower[::-1]]),
+                        fill='toself',
+                        fillcolor='rgba(255, 165, 0, 0.2)',
+                        line=dict(color='rgba(0,0,0,0)'),
+                        name='95% Confidence Interval'
+                    ))
+                    
+                    fig_cpu.add_trace(go.Scatter(
+                        x=x_range,
+                        y=cpu_y_predictions,
+                        mode='lines',
+                        name='Prediction',
+                        line=dict(width=3, color='orange', dash='dot')
+                    ))
+                    
+                    fig_cpu.add_trace(go.Scatter(
+                        x=[expected_size_gb],
+                        y=[cpu_prediction],
+                        mode='markers',
+                        name='Your Prediction',
+                        marker=dict(size=15, color='green', line=dict(width=2, color='white'))
+                    ))
+                    
+                    fig_cpu.add_vrect(x0=hist_min, x1=hist_max,
+                                     annotation_text="Historical Range",
+                                     annotation_position="top",
+                                     fillcolor="green", opacity=0.1, line_width=0)
+                    
+                    fig_cpu.update_layout(
+                        title=f"CPU Prediction vs Data Size (CV={cpu_cv:.0%})",
+                        xaxis_title="Data Size (GB)",
+                        yaxis_title="CPU Cores",
+                        showlegend=True,
+                        hovermode='x unified'
+                    )
+                    st.plotly_chart(fig_cpu, use_container_width=True)
+                    
+                    st.caption(f"**Green dot**: Your prediction ({cpu_prediction:.1f} cores) | **Orange dotted line**: Model prediction (plateaus at observed max: {max_cpu_cores:.1f} cores) | **Orange band**: 95% confidence interval | **Green area**: Historical data range")
+                    
+                    # CPU plateau explanation
+                    if cpu_prediction >= max_cpu_cores * 0.8:
+                        st.warning(f"⚠️ **Near CPU limit**: Your prediction ({cpu_prediction:.1f} cores) is close to the observed maximum ({max_cpu_cores:.1f} cores). The tool may not utilize additional CPUs effectively.")
+                    elif cpu_cv < 0.15:
+                        st.info(f"💡 **Stable CPU usage**: Low CV ({cpu_cv:.0%}) suggests this tool has consistent CPU requirements. Max observed: {max_cpu_cores:.1f} cores across {len(x_range)} historical runs.")
+                    
+                    # Add CPU-specific warning
+                    if cpu_cv < 0.1:
+                        st.info("💡 **CPU Note**: Low CV suggests CPU usage is consistent across data sizes. Most bioinformatics tools have fixed CPU requirements that don't scale with input size.")
+                    elif cpu_cv > 0.3:
+                        st.warning("⚠️ **High CPU Uncertainty**: CV > 30% suggests CPU usage varies significantly. Consider running more historical executions.")
+                    
+                    # Duration Prediction Uncertainty Plot
+                    st.subheader("⏱️ Duration Prediction Uncertainty")
+                    
+                    # Duration has baseline overhead + scaling component
+                    time_cv = time_pred['cv']
+                    time_prediction = time_pred['prediction']
+                    
+                    # Model: baseline (startup time) + linear scaling
+                    # Estimate baseline as ~20% of prediction (typical for workflow overhead)
+                    baseline_time = time_prediction * 0.2
+                    scaling_rate = (time_prediction - baseline_time) / max(0.001, expected_size_gb)
+                    
+                    time_y_predictions = baseline_time + (x_range * scaling_rate)
+                    time_y_upper = time_y_predictions * (1 + 1.96 * time_cv)
+                    time_y_lower = np.maximum(time_y_predictions * (1 - 1.96 * time_cv), baseline_time)
+                    
+                    fig_time = go.Figure()
+                    
+                    fig_time.add_trace(go.Scatter(
+                        x=np.concatenate([x_range, x_range[::-1]]),
+                        y=np.concatenate([time_y_upper, time_y_lower[::-1]]),
+                        fill='toself',
+                        fillcolor='rgba(128, 0, 128, 0.2)',
+                        line=dict(color='rgba(0,0,0,0)'),
+                        name='95% Confidence Interval'
+                    ))
+                    
+                    fig_time.add_trace(go.Scatter(
+                        x=x_range,
+                        y=time_y_predictions,
+                        mode='lines',
+                        name='Prediction',
+                        line=dict(width=3, color='purple')
+                    ))
+                    
+                    fig_time.add_trace(go.Scatter(
+                        x=[expected_size_gb],
+                        y=[time_prediction],
+                        mode='markers',
+                        name='Your Prediction',
+                        marker=dict(size=15, color='green', line=dict(width=2, color='white'))
+                    ))
+                    
+                    fig_time.add_vrect(x0=hist_min, x1=hist_max,
+                                      annotation_text="Historical Range",
+                                      annotation_position="top",
+                                      fillcolor="green", opacity=0.1, line_width=0)
+                    
+                    fig_time.update_layout(
+                        title=f"Duration Prediction vs Data Size (CV={time_cv:.0%})",
+                        xaxis_title="Data Size (GB)",
+                        yaxis_title="Duration (seconds)",
+                        showlegend=True,
+                        hovermode='x unified'
+                    )
+                    st.plotly_chart(fig_time, use_container_width=True)
+                    
+                    st.caption(f"**Green dot**: Your prediction ({time_prediction:.0f}s) | **Purple line**: Model prediction (includes baseline overhead) | **Purple band**: 95% confidence interval | **Green area**: Historical data range")
+                    
+                    # Add duration-specific warning
+                    if time_cv > 0.3:
+                        st.warning("⚠️ **High Duration Uncertainty**: CV > 30% suggests runtime varies significantly. Consider running more historical executions or adding time safety margin.")
+                    
+                    # Info box with visual ruler
+                    hist_min_gb = result['historical_size_range_gb']['min']
+                    hist_max_gb = result['historical_size_range_gb']['max']
+                    
+                    # Dynamically choose unit (GB or MB) for better readability
+                    if hist_max_gb < 0.1:  # Less than 100 MB - use MB
+                        unit = 'MB'
+                        hist_min = hist_min_gb * 1000
+                        hist_max = hist_max_gb * 1000
+                        user_input = expected_size_gb * 1000
+                        size_format = '.1f'
+                    elif hist_max_gb < 1000:  # 100 MB to 1 TB - use GB
+                        unit = 'GB'
+                        hist_min = hist_min_gb
+                        hist_max = hist_max_gb
+                        user_input = expected_size_gb
+                        size_format = '.2f'
+                    else:  # Greater than 1 TB - use TB
+                        unit = 'TB'
+                        hist_min = hist_min_gb / 1000
+                        hist_max = hist_max_gb / 1000
+                        user_input = expected_size_gb / 1000
+                        size_format = '.2f'
+                    
+                    # Calculate position for ruler (0-100%)
+                    if hist_max > hist_min:
+                        user_position = ((user_input - hist_min) / (hist_max - hist_min)) * 100
+                        user_position = max(0, min(100, user_position))  # Clamp to 0-100
+                    else:
+                        user_position = 50
+                    
+                    # Determine if extrapolating
+                    is_below = expected_size_gb < hist_min_gb
+                    is_above = expected_size_gb > hist_max_gb
+                    
+                    st.info(f"""
+                    **Model Details:**
+                    - Type: BayesianRidge
+                    - Historical runs used: {result.get('historical_runs_used', 0)}
+                    - Historical size range: {hist_min:{size_format}} - {hist_max:{size_format}} {unit}
+                    - Your input: {user_input:{size_format}} {unit}
+                    """)
+                    
+                    # Visual ruler
+                    st.write("**📏 Data Size Range:**")
+                    
+                    ruler_col1, ruler_col2, ruler_col3 = st.columns([1, 3, 1])
+                    
+                    with ruler_col1:
+                        st.write(f"**Min**  \n{hist_min:{size_format}} {unit}")
+                    
+                    with ruler_col3:
+                        st.write(f"**Max**  \n{hist_max:{size_format}} {unit}")
+                    
+                    with ruler_col2:
+                        # Create ruler visualization
+                        ruler_html = f"""
+                        <div style="position: relative; width: 100%; height: 60px; background: linear-gradient(90deg, #e0e0e0 0%, #2196F3 50%, #4CAF50 100%); border-radius: 8px; margin: 10px 0;">
+                            <!-- Historical range bar -->
+                            <div style="position: absolute; left: 10%; right: 10%; top: 20px; height: 8px; background: #2196F3; border-radius: 4px;"></div>
+                            
+                            <!-- User position marker -->
+                            <div style="position: absolute; left: {max(10, min(90, 10 + user_position * 0.8))}%; top: 8px; transform: translateX(-50%); text-align: center;">
+                                <div style="width: 3px; height: 20px; background: {'#f44336' if is_below or is_above else '#4CAF50'}; margin: 0 auto;"></div>
+                                <div style="color: {'#f44336' if is_below or is_above else '#4CAF50'}; font-weight: bold; font-size: 12px; margin-top: 2px;">You</div>
+                            </div>
+                        </div>
+                        """
+                        st.html(ruler_html)
+                        
+                        # Warning if extrapolating
+                        if is_below or is_above:
+                            direction = "below" if is_below else "above"
+                            st.warning(f"⚠️ Your input is **{direction}** the historical range - predictions may be less accurate")
+                        else:
+                            st.success("✅ Your input is **within** the historical range")
+                    
+                else:
+                    st.error(f"❌ Optimization failed: {result.get('error', 'Unknown error')}")
+                    if result.get('recommendation'):
+                        st.info(f"💡 Recommendation: {result['recommendation']}")
+                    
+            except Exception as e:
+                st.error(f"Connection failed: {e}")
 
 
 def render_model_performance():
@@ -956,7 +1572,7 @@ def render_model_performance():
         optimizations = []
     
     try:
-        response = requests.get(f"{API_BASE_URL}/ml/models", headers=headers)
+        response = requests.get(f"{API_BASE_URL}/ml/models/", headers=headers)
         
         if response.status_code == 200:
             models = response.json()
@@ -1153,6 +1769,7 @@ def render_workflow_summaries():
                 st.divider()
                 st.subheader("📊 Workflow Metrics Visualizations")
                 
+                # Status Distribution
                 if 'final_state' in df.columns:
                     col1, col2 = st.columns(2)
                     with col1:
@@ -1161,25 +1778,46 @@ def render_workflow_summaries():
                         st.plotly_chart(fig, use_container_width=True)
                     
                     with col2:
-                        if 'wall_clock_sec' in df.columns:
-                            df_clean = df[df['wall_clock_sec'].notna()]
+                        # Duration distribution
+                        if 'duration' in df.columns:
+                            df_clean = df[df['duration'].notna()]
                             if not df_clean.empty:
-                                fig = px.histogram(df_clean, x='wall_clock_sec', title='Wall Clock Time Distribution', nbins=20)
+                                fig = px.histogram(df_clean, x='duration', title='Workflow Duration Distribution', nbins=20,
+                                                  labels={'duration': 'Duration (seconds)'})
                                 fig.update_layout(xaxis_title='Duration (seconds)')
                                 st.plotly_chart(fig, use_container_width=True)
                 
-                if 'peak_memory_mb' in df.columns and 'peak_cpu_percent' in df.columns:
-                    df_clean = df[(df['peak_memory_mb'].notna()) & (df['peak_cpu_percent'].notna())]
-                    if not df_clean.empty:
-                        fig = px.scatter(df_clean, x='peak_memory_mb', y='peak_cpu_percent', title='Memory vs CPU Usage',
-                                        hover_data=['run_name'] if 'run_name' in df_clean.columns else None)
+                # Workflow duration over time
+                if 'start_time' in df.columns and 'duration' in df.columns:
+                    df_time = df[(df['start_time'].notna()) & (df['duration'].notna())].copy()
+                    if not df_time.empty:
+                        df_time['start_time'] = pd.to_datetime(df_time['start_time'], unit='s', errors='coerce')
+                        df_time = df_time.sort_values('start_time')
+                        fig = px.line(df_time, x='start_time', y='duration', title='Workflow Duration Over Time',
+                                     labels={'start_time': 'Start Time', 'duration': 'Duration (seconds)'})
+                        fig.update_layout(xaxis_title='Start Time', yaxis_title='Duration (seconds)')
                         st.plotly_chart(fig, use_container_width=True)
                 
-                if 'max_concurrent_processes' in df.columns:
-                    df_clean = df[df['max_concurrent_processes'].notna()]
-                    if not df_clean.empty:
-                        fig = px.histogram(df_clean, x='max_concurrent_processes', title='Concurrent Processes Distribution', nbins=20)
-                        st.plotly_chart(fig, use_container_width=True)
+                # Data size tag distribution
+                if 'data_size_tag' in df.columns:
+                    df_size = df[df['data_size_tag'].notna()]
+                    if not df_size.empty:
+                        col3, col4 = st.columns(2)
+                        with col3:
+                            size_counts = df_size['data_size_tag'].value_counts()
+                            fig = px.bar(x=size_counts.index, y=size_counts.values, title='Data Size Tag Distribution',
+                                        labels={'x': 'Data Size Tag', 'y': 'Count'})
+                            fig.update_layout(xaxis_tickangle=-45)
+                            st.plotly_chart(fig, use_container_width=True)
+                        
+                        with col4:
+                            # Duration by data size tag
+                            df_tag_dur = df_size[['data_size_tag', 'duration']].dropna()
+                            if not df_tag_dur.empty:
+                                fig = px.box(df_tag_dur, x='data_size_tag', y='duration', title='Duration by Data Size Tag',
+                                            labels={'data_size_tag': 'Data Size Tag', 'duration': 'Duration (seconds)'})
+                                fig.update_layout(xaxis_tickangle=-45)
+                                st.plotly_chart(fig, use_container_width=True)
                         
     except Exception as e:
         st.error(f"Failed to fetch workflow data: {e}")
@@ -1194,17 +1832,194 @@ def main():
     
     if page == "Workflow Summaries":
         render_workflow_summaries()
-    elif page == "Dashboard":
+    elif page == "Analytics & Dashboard":
+        # Combined Analytics & Dashboard page with tabs
         df = fetch_process_data(API_KEY)
-        render_resource_charts(df)
-    elif page == "Analytics":
-        render_analytics()
-    elif page == "ML Training":
-        render_ml_training()
-    elif page == "Optimizations":
-        render_optimizations()
-    elif page == "Model Performance":
-        render_model_performance()
+        analytics_tab = st.tabs(["📊 Dashboard", "📈 Analytics"])
+        
+        with analytics_tab[0]:
+            render_resource_charts(df)
+        
+        with analytics_tab[1]:
+            render_analytics()
+    elif page == "Bayesian Modelling":
+        # Bayesian Modelling page with 3 tabs
+        ml_tab = st.tabs(["🤖 Training", "🎯 Optimizations", "🚀 Bulk Optimizations"])
+        
+        with ml_tab[0]:
+            render_ml_training()
+        
+        with ml_tab[1]:
+            render_optimizations()
+        
+        with ml_tab[2]:
+            render_bulk_optimizations()
+
+
+
+def render_bulk_optimizations():
+    """Generate optimized configs for ALL trained modules at once."""
+    st.title("🚀 Bulk Optimizations - All Modules")
+    st.write("""
+    **Generate optimized Nextflow configs for all trained processes**
+    
+    This generates resource allocations for every process with a trained Bayesian model.
+    Perfect for adding to your pipeline-wide Nextflow configuration.
+    """)
+    
+    if not API_KEY:
+        st.warning("Please enter your API key in the sidebar to authenticate.")
+        return
+    
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    # Get all trained models
+    try:
+        models_response = requests.get(f"{API_BASE_URL}/ml/models/", headers=headers)
+        if models_response.status_code == 200:
+            models = models_response.json()
+        else:
+            models = []
+    except Exception:
+        models = []
+    
+    if not models:
+        st.warning("No trained models found. Train models first in the Training tab.")
+        return
+    
+    # Group by process name
+    from collections import defaultdict
+    processes = defaultdict(dict)
+    for model in models:
+        process_name = model.get('process_name', 'Unknown')
+        resource_type = model.get('resource_type', 'unknown')
+        processes[process_name][resource_type] = model
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Processes with trained models", len(processes))
+    with col2:
+        st.metric("Models available", len(models))
+    
+    st.divider()
+    
+    # Priority selection
+    st.subheader("1️⃣ Optimization Priority")
+    priority = st.radio(
+        "Select optimization strategy for all processes:",
+        options=["balanced", "cost", "performance"],
+        horizontal=True,
+        help="Balanced: Dynamic safety margins | Cost: Minimize resources | Performance: Conservative allocations"
+    )
+    
+    # Expected data size input
+    st.subheader("2️⃣ Expected Input Data Size")
+    st.write("**How should data size be determined for each process?**")
+    
+    data_size_option = st.radio(
+        "Data size strategy:",
+        options=["📊 Use historical average per process", "📈 Use historical maximum per process", "✏️ Custom size (same for all processes)"],
+        horizontal=False
+    )
+    
+    custom_size_gb = None
+    if "Custom size" in data_size_option:
+        custom_size_gb = st.number_input(
+            "Enter your expected data size in GB",
+            min_value=0.001,
+            max_value=10000.0,
+            value=50.0,
+            step=0.1,
+            help="This size will be used for ALL processes"
+        )
+    
+    # Generate button
+    if st.button("🚀 Generate Bulk Optimizations", type="primary"):
+        with st.spinner(f"Generating optimizations for {len(processes)} processes..."):
+            all_configs = []
+            
+            for process_name in sorted(processes.keys()):
+                process_models = processes[process_name]
+                
+                # Determine data size for this process
+                if custom_size_gb is not None:
+                    expected_disk_gb = custom_size_gb
+                else:
+                    # Get disk stats from historical data
+                    try:
+                        hist_response = requests.get(f"{API_BASE_URL}/ml/optimization/{process_name}", headers=headers)
+                        if hist_response.status_code == 200:
+                            hist_data = hist_response.json()
+                            disk_stats = hist_data.get('disk', {})
+                            if data_size_option == "Use historical maximum":
+                                expected_disk_gb = disk_stats.get('max', 1.0) / 1000  # Convert MB to GB
+                            else:  # average
+                                expected_disk_gb = disk_stats.get('mean', 1.0) / 1000
+                        else:
+                            expected_disk_gb = 1.0
+                    except Exception:
+                        expected_disk_gb = 1.0
+                
+                # Call optimize endpoint
+                try:
+                    optimize_request = {
+                        "process_name": process_name,
+                        "expected_disk_gb": expected_disk_gb,
+                        "priority": priority
+                    }
+                    opt_response = requests.post(
+                        f"{API_BASE_URL}/ml/optimize-for-size",
+                        headers=headers,
+                        json=optimize_request
+                    )
+                    
+                    if opt_response.status_code == 200:
+                        result = opt_response.json()
+                        if result.get('success'):
+                            config = result.get('nextflow_config', '')
+                            predictions = result.get('predictions', {})
+                            all_configs.append({
+                                'process': process_name,
+                                'config': config,
+                                'memory': predictions.get('memory', {}).get('final_with_safety', 0),
+                                'time': predictions.get('time', {}).get('final_with_safety', 0),
+                                'cpus': predictions.get('cpu', {}).get('final_with_safety', 1)
+                            })
+                except Exception as e:
+                    st.error(f"Failed to optimize {process_name}: {e}")
+            
+            if all_configs:
+                st.success(f"✅ Generated configs for {len(all_configs)} processes!")
+                
+                # Show summary table
+                st.subheader("Resource Summary")
+                import pandas as pd
+                df_summary = pd.DataFrame([{
+                    'Process': c['process'],
+                    'Memory (MB)': f"{c['memory']:.0f}",
+                    'Time (sec)': f"{c['time']:.0f}",
+                    'CPUs': int(c['cpus'])
+                } for c in all_configs])
+                st.dataframe(df_summary, use_container_width=True)
+                
+                # Combined Nextflow config
+                st.subheader("Combined Nextflow Configuration")
+                combined_config = "\n\n".join([c['config'] for c in all_configs])
+                st.code(combined_config, language="groovy")
+                
+                # Download button
+                st.download_button(
+                    label="📥 Download Nextflow Config",
+                    data=combined_config,
+                    file_name="optimized_nextflow.config",
+                    mime="text/plain"
+                )
+            else:
+                st.error("Failed to generate any configs. Check server logs.")
+
 
 if __name__ == "__main__":
     main()
