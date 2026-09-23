@@ -6,7 +6,13 @@
 # Environment files
 api/.env
 db/.env
+work/*
 .env
+.nextflow*
+co2footprint*
+nf-*-reports.tsv
+.lineage/*
+.opencode/*
 
 # Python artifacts
 __pycache__/

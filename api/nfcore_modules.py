@@ -45,8 +45,8 @@ def normalize_module_name(process_name: str, nfcore_cache=None) -> str:
     """
     Normalize process name to nf-core TOOL_SUBTOOL format.
     
-    If the tool is in nf-core cache, keep TOOL_SUBTOOL.
-    Otherwise return as-is.
+    1. First check cache for official nf-core module names
+    2. If cache doesn't exist or module not found, strip weird suffixes (_FP, _1, _2, etc.)
     """
     _load_cache()
     
@@ -69,36 +69,39 @@ def normalize_module_name(process_name: str, nfcore_cache=None) -> str:
         tool = parts[0]
         subtool = parts[1]
         
-        # Remove numeric suffix from subtool
+        # Remove numeric suffix from subtool (e.g., TABIX_2 -> TABIX)
         subtool_clean = subtool.rstrip('0123456789')
         
         candidate = f'{tool}_{subtool_clean}'
         
-        # Check if exact match in nf-core
+        # PRIORITY 1: Check if exact match in nf-core cache
         if candidate in NFCORE_MODULES:
             return candidate
         
-        # In this case, try to find the correct subtool
+        # PRIORITY 2: Try to find correct subtool from cache
+        # Handle cases like BCFTOOLS_FILTER_TRUTH_FN → BCFTOOLS_FILTER
         if tool in subtool_clean and len(subtool_clean) > len(tool):
-            # Find matching nf-core module for this tool
             for nf_module in NFCORE_MODULES:
                 if nf_module.startswith(f'{tool}_'):
                     nf_subtool = nf_module.split('_', 1)[1]
-                    # Check if the garbage subtool contains this subtool
                     if nf_subtool in subtool_clean:
                         return f'{tool}_{nf_subtool}'
             
-            # Just return first valid subtool for this tool
+            # Return first valid subtool for this tool
             for nf_module in sorted(NFCORE_MODULES):
                 if nf_module.startswith(f'{tool}_'):
                     return nf_module
         
-        # Check if tool exists in nf-core
+        # PRIORITY 3: Check if tool exists in nf-core
         tool_modules = [m for m in NFCORE_MODULES if m.startswith(f'{tool}_')]
         if tool_modules:
             return f'{tool}_{subtool_clean}'
+        
+        # FALLBACK: Cache doesn't exist or module not found
+        # Strip weird suffixes: _TRUTH_FN, _QUERY_FP, _2, etc.
+        return f'{tool}_{subtool_clean}'
     
-    # Not an nf-core tool, return as-is
+    # Not enough parts, return as-is
     return module
 
 

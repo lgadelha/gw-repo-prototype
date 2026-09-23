@@ -85,10 +85,13 @@ class BayesianResourcePredictor:
             }
         
         # Prepare features
-        X = historical_data[self.feature_cols].values
+        X = historical_data[self.feature_cols].copy()
         y_memory = historical_data['peak_rss_mb'].values.astype(float)
         y_time = historical_data['duration'].values.astype(float)
         y_cpu = (historical_data['percent_cpu'].values / 100.0).astype(float)  # Normalize to 0-1
+        
+        # Handle NaN values in features - replace with column mean or 0
+        X = X.fillna(0)
         
         # Remove rows with invalid targets
         valid_mask = (
@@ -109,13 +112,12 @@ class BayesianResourcePredictor:
                 'success': False
             }
         
-        # Scale features
+        # Scale features (single scaler for all resources)
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X_valid)
         
         # Train models for each resource
         models = {}
-        scalers = {}
         
         for resource_type, y in [
             ('memory', y_memory_valid),
@@ -126,11 +128,9 @@ class BayesianResourcePredictor:
             model.fit(X_scaled, y)
             models[resource_type] = model
         
-        scalers = {resource_type: scaler for resource_type in ['memory', 'time', 'cpu']}
-        
-        # Store models
+        # Store models and single scaler
         self.models[process_name] = models
-        self.scalers[process_name] = scalers
+        self.scalers[process_name] = scaler
         
         # Save to disk
         for resource_type, model in models.items():

@@ -99,7 +99,22 @@ def render_resource_charts(df: pd.DataFrame):
     
     if df is not None and isinstance(df, pd.DataFrame) and not df.empty:
         display_df = df.copy()
-        if 'process_name' in display_df.columns:
+        # Use module_name if available (already normalized), otherwise normalize process_name
+        if 'module_name' in display_df.columns and display_df['module_name'].notna().any():
+            # Use module_name directly - it's already normalized by nf-core module cache
+            # Replace empty strings with NA first
+            display_df['normalized_name'] = display_df['module_name'].replace('', pd.NA)
+            # For rows where module_name is NA, extract and normalize from process_name
+            if 'process_name' in display_df.columns:
+                # Extract short name from process_name for NA module_name rows
+                display_df['short_name'] = display_df['process_name'].apply(
+                    lambda x: x.split(':')[-1] if isinstance(x, str) else str(x)
+                )
+                # Normalize short names
+                display_df['short_name_normalized'] = display_df['short_name'].apply(normalize_process_name)
+                # Fill NA module_name with normalized short_name
+                display_df['normalized_name'] = display_df['normalized_name'].fillna(display_df['short_name_normalized'])
+        elif 'process_name' in display_df.columns:
             # Clean process names (remove instance suffixes)
             display_df['process_name'] = display_df['process_name'].apply(
                 lambda x: re.sub(r'\s*\(.*\)', '', str(x)) if isinstance(x, str) else str(x)
@@ -347,22 +362,39 @@ def render_analytics():
         st.info("No data available. Submit workflow data first.")
         return
     
-    # Sanitize and normalize process names
+    # Use module_name if available (already normalized), otherwise normalize process_name
     df = df.copy()
-    if 'process_name' in df.columns:
+    if 'module_name' in df.columns and df['module_name'].notna().any():
+        # Use module_name directly - it's already normalized by nf-core module cache
+        # Replace empty strings with NA first
+        df['normalized_name'] = df['module_name'].replace('', pd.NA)
+        # For rows where module_name is NA, extract and normalize from process_name
+        if 'process_name' in df.columns:
+            # Extract short name from process_name for NA module_name rows
+            df['short_name'] = df['process_name'].apply(
+                lambda x: x.split(':')[-1] if isinstance(x, str) else str(x)
+            )
+            # Normalize short names
+            df['short_name_normalized'] = df['short_name'].apply(normalize_process_name)
+            # Fill NA module_name with normalized short_name
+            df['normalized_name'] = df['normalized_name'].fillna(df['short_name_normalized'])
+    elif 'process_name' in df.columns:
+        # Fallback: extract and normalize from process_name
         df['process_name'] = df['process_name'].apply(
             lambda x: re.sub(r'\s*\(.*\)', '', str(x)) if isinstance(x, str) else str(x)
         )
         df['short_name'] = df['process_name'].apply(
             lambda x: x.split(':')[-1] if isinstance(x, str) else str(x)
         )
-        # Apply normalization to merge variants
         df['normalized_name'] = df['short_name'].apply(normalize_process_name)
     else:
         df['normalized_name'] = 'Unknown'
     
+    # Filter out processes with no module_name AND no meaningful process_name
+    df = df[df['normalized_name'].notna() & (df['normalized_name'] != '') & (df['normalized_name'] != 'Unknown')]
+    
     # Get unique normalized process names
-    processes = sorted(df['normalized_name'].unique().tolist())
+    processes = sorted(df['normalized_name'].dropna().unique().tolist())
     
     if not processes:
         st.info("No processes found.")
@@ -1761,10 +1793,125 @@ def render_workflow_summaries():
             df = pd.DataFrame(workflows)
             
             if not df.empty:
+                # Convert timestamps to datetime for better display
+                if 'start_time' in df.columns:
+                    df['start_time_dt'] = pd.to_datetime(df['start_time'], unit='s', errors='coerce')
+                    df['start_date'] = df['start_time_dt'].dt.date
+                    df['start_hour'] = df['start_time_dt'].dt.strftime('%H:%M')
+                
+                # ============================================
+                # FILTERS AND SEARCH
+                # ============================================
+                st.subheader("🔍 Search & Filter")
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    # Filter by date
+                    if 'start_date' in df.columns:
+                        unique_dates = sorted(df['start_date'].dropna().unique())
+                        selected_date = st.selectbox("Filter by Date", options=["All"] + [str(d) for d in unique_dates])
+                    else:
+                        selected_date = "All"
+                
+                with col2:
+                    # Filter by status
+                    if 'final_state' in df.columns:
+                        unique_states = sorted(df['final_state'].dropna().unique())
+                        selected_state = st.selectbox("Filter by Status", options=["All"] + list(unique_states))
+                    else:
+                        selected_state = "All"
+                
+                with col3:
+                    # Search by run name or ID
+                    search_text = st.text_input("Search by Run Name or ID", placeholder="e.g., disturbed_bartik or workflow ID")
+                
+                # Apply filters
+                filtered_df = df.copy()
+                
+                if selected_date != "All" and 'start_date' in df.columns:
+                    filtered_df = filtered_df[filtered_df['start_date'].astype(str) == selected_date]
+                
+                if selected_state != "All" and 'final_state' in df.columns:
+                    filtered_df = filtered_df[filtered_df['final_state'] == selected_state]
+                
+                if search_text:
+                    search_mask = pd.Series([False] * len(filtered_df))
+                    if 'run_name' in filtered_df.columns:
+                        search_mask |= filtered_df['run_name'].astype(str).str.contains(search_text, case=False, na=False)
+                    if 'id' in filtered_df.columns:
+                        search_mask |= filtered_df['id'].astype(str).str.contains(search_text, case=False, na=False)
+                    filtered_df = filtered_df[search_mask]
+                
+                st.info(f"Showing {len(filtered_df)} of {len(df)} workflows")
+                
+                # ============================================
+                # WORKFLOW TABLE
+                # ============================================
                 st.subheader("📋 Workflow Execution Table")
-                display_cols = [col for col in ['id', 'run_name', 'final_state', 'wall_clock_sec', 'peak_cpu_percent', 'peak_memory_mb', 'max_concurrent_processes'] if col in df.columns]
-                if display_cols:
-                    st.dataframe(df[display_cols], use_container_width=True)
+                
+                # Select and order columns for display
+                display_columns = []
+                if 'start_time_dt' in filtered_df.columns:
+                    display_columns.append('start_time_dt')
+                if 'run_name' in filtered_df.columns:
+                    display_columns.append('run_name')
+                if 'final_state' in filtered_df.columns:
+                    display_columns.append('final_state')
+                if 'duration' in filtered_df.columns:
+                    display_columns.append('duration')
+                if 'data_size_tag' in filtered_df.columns:
+                    display_columns.append('data_size_tag')
+                if 'id' in filtered_df.columns:
+                    display_columns.append('id')
+                
+                if display_columns:
+                    # Format datetime for display
+                    display_df = filtered_df[display_columns].copy()
+                    if 'start_time_dt' in display_df.columns:
+                        display_df['Start Time'] = display_df['start_time_dt'].dt.strftime('%Y-%m-%d %H:%M:%S')
+                        display_df = display_df.drop(columns=['start_time_dt'])
+                    if 'duration' in display_df.columns:
+                        display_df['Duration (min)'] = (display_df['duration'] / 60).round(2)
+                        display_df = display_df.drop(columns=['duration'])
+                    
+                    # Rename columns for better readability
+                    column_labels = {
+                        'run_name': 'Run Name',
+                        'final_state': 'Status',
+                        'data_size_tag': 'Data Size',
+                        'id': 'Workflow ID'
+                    }
+                    display_df = display_df.rename(columns=column_labels)
+                    
+                    st.dataframe(display_df, use_container_width=True, hide_index=True)
+                    
+                    # Show details for selected workflow
+                    if not filtered_df.empty:
+                        st.divider()
+                        st.subheader("📊 Workflow Details")
+                        selected_workflow = st.selectbox(
+                            "Select workflow to view details",
+                            options=filtered_df['id'].tolist(),
+                            format_func=lambda x: f"{filtered_df[filtered_df['id']==x]['run_name'].values[0] if 'run_name' in filtered_df.columns else 'No name'} ({x[:8]}...)"
+                        )
+                        
+                        if selected_workflow:
+                            workflow_detail = filtered_df[filtered_df['id'] == selected_workflow].iloc[0]
+                            
+                            # Show workflow details
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.metric("Run Name", workflow_detail.get('run_name', 'N/A'))
+                                st.metric("Status", workflow_detail.get('final_state', 'N/A'))
+                                st.metric("Data Size Tag", workflow_detail.get('data_size_tag', 'N/A'))
+                            
+                            with col2:
+                                if 'start_time_dt' in workflow_detail:
+                                    st.metric("Start Time", workflow_detail['start_time_dt'].strftime('%Y-%m-%d %H:%M:%S'))
+                                if 'duration' in workflow_detail:
+                                    st.metric("Duration", f"{workflow_detail['duration']/60:.1f} min")
+                                st.metric("Workflow ID", selected_workflow[:32] + "...")
                 
                 st.divider()
                 st.subheader("📊 Workflow Metrics Visualizations")

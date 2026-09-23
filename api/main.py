@@ -298,10 +298,11 @@ def _upsert_tasks(tasks: List[dict], workflow_id: str, institute: str, data_size
         ))
 
 
+@app.post("/{institute}/trace/create")
 @app.post("/{institute}/{data_size_tag}/trace/create")
 def tower_trace_create(
     institute: str,
-    data_size_tag: str,
+    data_size_tag: Optional[str] = None,
     payload: dict = Body(...),
     session: Session = Depends(get_session),
     api_key: str = Depends(verify_tower_auth),
@@ -310,19 +311,22 @@ def tower_trace_create(
     if not session_id:
         raise HTTPException(status_code=400, detail="missing sessionId")
     _ensure_institute(institute, session)
-    session.merge(WorkflowExecution(id=session_id, institute_id=institute, data_size_tag=data_size_tag))
+    # Truncate workflow ID to 16 chars to avoid Seqera Platform warning
+    # Must use same truncated ID everywhere for foreign key consistency
+    workflow_id_short = session_id.replace("-", "")[:16]
+    session.merge(WorkflowExecution(id=workflow_id_short, institute_id=institute, data_size_tag=data_size_tag))
     session.commit()
     # Nextflow's tower client uses whatever id comes back here as {workflowId} in
-    # every later /trace/{workflowId}/... call -- echo the full session id so every
-    # gw-repo row stays keyed on Nextflow's own session.uniqueId.
-    return {"workflowId": session_id}
+    # every later /trace/{workflowId}/... call
+    return {"workflowId": workflow_id_short}
 
 
+@app.put("/{institute}/trace/{workflow_id}/begin")
 @app.put("/{institute}/{data_size_tag}/trace/{workflow_id}/begin")
 def tower_trace_begin(
     institute: str,
-    data_size_tag: str,
     workflow_id: str,
+    data_size_tag: Optional[str] = None,
     payload: dict = Body(...),
     session: Session = Depends(get_session),
     api_key: str = Depends(verify_tower_auth),
@@ -330,15 +334,17 @@ def tower_trace_begin(
     wf = payload.get("workflow") or {}
     session.merge(_workflow_row_from_payload(wf, workflow_id, institute, data_size_tag))
     session.commit()
-    return {"watchUrl": f"/{institute}/{data_size_tag}/workflows/{workflow_id}"}
+    return {"watchUrl": f"/{institute}/{data_size_tag or 'workflows'}/{workflow_id}"}
 
 
+@app.put("/{institute}/trace/{workflow_id}/progress")
+@app.put("/{institute}/trace/{workflow_id}/heartbeat")
 @app.put("/{institute}/{data_size_tag}/trace/{workflow_id}/progress")
 @app.put("/{institute}/{data_size_tag}/trace/{workflow_id}/heartbeat")
 def tower_trace_progress(
     institute: str,
-    data_size_tag: str,
     workflow_id: str,
+    data_size_tag: Optional[str] = None,
     payload: dict = Body(...),
     session: Session = Depends(get_session),
     api_key: str = Depends(verify_tower_auth),
@@ -348,11 +354,12 @@ def tower_trace_progress(
     return {}
 
 
+@app.put("/{institute}/trace/{workflow_id}/complete")
 @app.put("/{institute}/{data_size_tag}/trace/{workflow_id}/complete")
 def tower_trace_complete(
     institute: str,
-    data_size_tag: str,
     workflow_id: str,
+    data_size_tag: Optional[str] = None,
     payload: dict = Body(...),
     session: Session = Depends(get_session),
     api_key: str = Depends(verify_tower_auth),
@@ -1003,7 +1010,7 @@ def get_extrapolation_warning(extrapolation_factor: float, training_stats: Dict)
 def format_memory(mb_value: float) -> str:
     """
     Format memory to human-readable values.
-    Uses MB for values < 1024, GB for larger values.
+    Uses MB for values < 1024, GB for larger values, TB for very large values.
     """
     if mb_value <= 0:
         return "64 MB"
@@ -1025,10 +1032,42 @@ def format_memory(mb_value: float) -> str:
         return "8 GB"
     elif mb_value < 32768:
         return "16 GB"
-    else:
-        # For very large values, round to nearest 16 GB
+    elif mb_value < 65536:  # 64 GB
+        gb_value = int(round(mb_value / 1024))
+        return f"{gb_value} GB"
+    elif mb_value < 1048576:  # 1 TB
+        # Round to nearest 16 GB for large values
         gb_value = int(round(mb_value / 1024 / 16) * 16)
         return f"{gb_value} GB"
+    else:
+        # For TB-scale values
+        tb_value = round(mb_value / 1048576, 1)
+        return f"{tb_value} TB"
+
+
+def format_memory_nextflow(mb_value: float) -> str:
+    """
+    Format memory for Nextflow config with appropriate units.
+    Uses MB for values < 1024, GB for larger values, TB for very large values.
+    """
+    if mb_value <= 0:
+        return "64.MB"
+    elif mb_value < 1024:
+        return f"{int(round(mb_value))}.MB"
+    elif mb_value < 1048576:  # < 1 TB
+        gb_value = round(mb_value / 1024, 1)
+        # Remove decimal if whole number
+        if gb_value == int(gb_value):
+            return f"{int(gb_value)}.GB"
+        else:
+            # Format with one decimal, strip trailing zeros
+            gb_str = str(gb_value).rstrip('0').rstrip('.')
+            return f"{gb_str}.GB"
+    else:
+        tb_value = round(mb_value / 1048576, 2)
+        # Format and strip trailing zeros
+        tb_str = str(tb_value).rstrip('0').rstrip('.')
+        return f"{tb_str}.TB"
 
 
 def round_time(seconds: float, minimum_seconds: int = 3600) -> str:
@@ -1907,10 +1946,11 @@ def optimize_for_data_size(
         
         # Generate Nextflow config (ensure non-negative values)
         memory_mb = max(256, predictions['memory']['final_with_safety'])  # Minimum 256 MB
+        memory_formatted = format_memory_nextflow(memory_mb)
         nextflow_config = f"""process {{
     withName: '{process_name}' {{
         cpus = {max(1, round(predictions['cpu']['final_with_safety']))}
-        memory = {memory_mb:.0f}.MB
+        memory = {memory_formatted}
         time = {time_formatted}
         
         // Bayesian prediction with uncertainty
