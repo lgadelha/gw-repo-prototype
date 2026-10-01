@@ -349,9 +349,20 @@ def tower_trace_progress(
     session: Session = Depends(get_session),
     api_key: str = Depends(verify_tower_auth),
 ):
-    _upsert_tasks(payload.get("tasks") or [], workflow_id, institute, data_size_tag, session)
-    session.commit()
-    return {}
+    try:
+        # Temporarily disable autoflush to prevent foreign key violations
+        # when workflow execution row isn't visible yet
+        original_autoflush = session.autoflush
+        session.autoflush = False
+        try:
+            _upsert_tasks(payload.get("tasks") or [], workflow_id, institute, data_size_tag, session)
+            session.commit()
+        finally:
+            session.autoflush = original_autoflush
+        return {}
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to save task progress: {str(e)}")
 
 
 @app.put("/{institute}/trace/{workflow_id}/complete")
@@ -364,10 +375,14 @@ def tower_trace_complete(
     session: Session = Depends(get_session),
     api_key: str = Depends(verify_tower_auth),
 ):
-    wf = payload.get("workflow") or {}
-    session.merge(_workflow_row_from_payload(wf, workflow_id, institute, data_size_tag))
-    session.commit()
-    return {}
+    try:
+        wf = payload.get("workflow") or {}
+        session.merge(_workflow_row_from_payload(wf, workflow_id, institute, data_size_tag))
+        session.commit()
+        return {}
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to complete workflow: {str(e)}")
 
 
 # CO2 endpoints must come BEFORE /processes/{process_id} to avoid route conflicts
