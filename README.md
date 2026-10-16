@@ -130,7 +130,15 @@ with `POST /workflows/{id}/annotations/`, and filter runs with
 **Per task** (`/trace/{id}/progress`, `/heartbeat`): process name, module, container,
 exit status, requested vs. actual CPU / memory / time / disk, `%cpu`, `%mem`,
 `peak_rss`, `peak_vmem`, `rchar` / `wchar`, `read_bytes` / `write_bytes`, realtime,
-queue.
+queue, tag, task name and attempt number.
+
+**Retries.** Every attempt of a task is its own row (Nextflow gives each retry a new task
+id and work dir). Attempts of one task share the workflow and `task_name`
+(`<process> (<tag or index>)`):
+- `GET /processes/{id}/attempts` lists all attempts of that row's task, in start order;
+- the `logical_task` SQL view has one row per task: number of attempts, whether it
+  succeeded (`COMPLETED` or `CACHED`), and how many attempts were killed for exceeding
+  memory or time (exit 137/140), with the most memory and time those attempts were given.
 
 ### 2. File provenance — `lineage {}` + `lineage-import`
 

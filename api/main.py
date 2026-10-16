@@ -118,6 +118,8 @@ class ProcessExecution(SQLModel, table=True):
     task_id: Optional[int] = None  # Nextflow's per-run task id (tower payload's `taskId`); lets post-run importers (co2-import, lineage-import) resolve this row without a marker file
     process_name: str
     tag: Optional[str] = None  # Nextflow task tag; nf-core sets it to the sample id (meta.id), matching Samplemetric.sample
+    task_name: Optional[str] = None  # Nextflow task name, "<process> (<tag or index>)"; the same for every attempt of a task
+    attempt: Optional[int] = None  # 1 for the first try, 2+ for retries (each retry is its own row, task_id and work dir)
     module_name: Optional[str] = None
     container_name: Optional[str] = None
     final_status: str
@@ -161,6 +163,31 @@ def get_session():
 @app.on_event("startup")
 def on_startup():
     SQLModel.metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(text(LOGICAL_TASK_VIEW))
+
+
+# One row per logical task (MTCProv's function call) over its attempts (executions).
+# Attempts share workflow and task name; retries get new task ids and work dirs.
+# CACHED counts as success: on -resume it is the earlier successful attempt's row.
+# Exit 137/140: killed for exceeding memory/time, so the true need was above what
+# that attempt requested.
+LOGICAL_TASK_VIEW = """
+CREATE OR REPLACE VIEW logical_task AS
+SELECT workflow_execution_id,
+       task_name,
+       min(process_name) AS process_name,
+       min(tag) AS tag,
+       count(*) AS attempts,
+       max(attempt) AS last_attempt,
+       bool_or(final_status IN ('COMPLETED', 'CACHED')) AS succeeded,
+       count(*) FILTER (WHERE exit_code IN (137, 140)) AS killed_attempts,
+       max(memory_requested) FILTER (WHERE exit_code IN (137, 140)) AS killed_max_memory_requested,
+       max(time_requested) FILTER (WHERE exit_code IN (137, 140)) AS killed_max_time_requested
+FROM processexecution
+WHERE task_name IS NOT NULL
+GROUP BY workflow_execution_id, task_name
+"""
 
 
 @app.post("/workflows/", response_model=WorkflowExecution)
@@ -327,6 +354,8 @@ def _upsert_tasks(tasks: List[dict], workflow_id: str, institute: str, data_size
             memory_requested=_bytes_to_mb(task.get("memory")),
             queue_name=_str_field(task.get("queue")),
             tag=_str_field(task.get("tag")),
+            task_name=_str_field(task.get("name")),
+            attempt=task.get("attempt"),
             percent_cpu=task.get("pcpu") or 0.0,
             percent_memory=task.get("pmem") or 0.0,
             peak_rss=_bytes_to_mb(task.get("peakRss")) or 0.0,
@@ -463,6 +492,22 @@ def get_process(process_id: str, session: Session = Depends(get_session), api_ke
     if not process:
         raise HTTPException(status_code=404, detail="Process not found")
     return process
+
+@app.get("/processes/{process_id}/attempts", response_model=List[ProcessExecution])
+def get_process_attempts(process_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
+    """All attempts of the logical task this process execution belongs to (same
+    workflow and task name), in the order they started."""
+    process = session.get(ProcessExecution, process_id)
+    if not process:
+        raise HTTPException(status_code=404, detail="Process not found")
+    if not process.task_name:
+        return [process]
+    return session.exec(
+        select(ProcessExecution)
+        .where(ProcessExecution.workflow_execution_id == process.workflow_execution_id,
+               ProcessExecution.task_name == process.task_name)
+        .order_by(ProcessExecution.start_time)
+    ).all()
 
 @app.delete("/processes/{process_id}")
 def delete_process(process_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
