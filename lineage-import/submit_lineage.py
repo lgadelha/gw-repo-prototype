@@ -158,7 +158,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run-dir", default=".", help="dir the pipeline ran in (default: .)")
     ap.add_argument("--workflow-id", help="override the workflow id resolved from .nextflow/history")
-    ap.add_argument("--endpoint", default="http://localhost:80", help="GW-RePO API base URL (default: http://localhost:80)")
+    ap.add_argument("--endpoint", default=os.environ.get("GWREPO_URL", "http://localhost:80"), help="GW-RePO API base URL (default: $GWREPO_URL, else http://localhost:80)")
     ap.add_argument("--dry-run", action="store_true", help="print what would be POSTed, don't POST")
     args = ap.parse_args()
 

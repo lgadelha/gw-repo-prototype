@@ -38,7 +38,7 @@ python lineage-import/submit_lineage.py       # from the same directory
 |---|---|
 | `--run-dir` | `.` |
 | `--workflow-id` | resolved from `.nextflow/history` |
-| `--endpoint` | `http://localhost:80` |
+| `--endpoint` | `$GWREPO_URL`, else `http://localhost:80` |
 | `--dry-run` | print what would be POSTed instead of POSTing |
 
 ## Wiring it into a run

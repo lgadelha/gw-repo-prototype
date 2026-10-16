@@ -40,7 +40,7 @@ python co2-import/submit_co2.py               # from the same directory
 | `--provenance` | newest `co2footprint_provenance*.json` under `--run-dir` |
 | `--summary` | newest `co2footprint_summary*.txt` under `--run-dir` |
 | `--workflow-id` | resolved from `.nextflow/history` |
-| `--endpoint` | `http://localhost:80` |
+| `--endpoint` | `$GWREPO_URL`, else `http://localhost:80` |
 | `--dry-run` | print payloads instead of POSTing |
 
 ## Wiring it into a run

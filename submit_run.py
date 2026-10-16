@@ -14,6 +14,7 @@ Usage:
     `uv run --script`; or `python submit_run.py ...` with `typer` already installed)
 
 Needs GWREPO_API_KEY in the environment (passed through to both importers unchanged).
+Reads GWREPO_URL as the --endpoint default, same as gwrepo.config's tower endpoint.
 
 Unlike lineage-import/submit_lineage.py and co2-import/submit_co2.py, which are
 stdlib-only by design (see their READMEs -- they're meant to run with no setup),
@@ -47,7 +48,7 @@ def _run(script: Path, args: list, label: str) -> int:
 @app.command()
 def main(
     run_dir: str = typer.Option(".", help="dir the pipeline ran in"),
-    endpoint: str = typer.Option("http://localhost:80", help="GW-RePO API base URL"),
+    endpoint: str = typer.Option("http://localhost:80", envvar="GWREPO_URL", help="GW-RePO API base URL"),
     workflow_id: Optional[str] = typer.Option(
         None, help="override the workflow id (default: resolved from .nextflow/history)"
     ),

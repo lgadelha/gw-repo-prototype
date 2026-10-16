@@ -190,7 +190,7 @@ def main():
     ap.add_argument("--provenance", help="path to co2footprint_provenance_*.json (default: newest under --run-dir)")
     ap.add_argument("--summary", help="path to co2footprint_summary_*.txt (default: newest under --run-dir)")
     ap.add_argument("--workflow-id", help="override the workflow id resolved from .nextflow/history")
-    ap.add_argument("--endpoint", default="http://localhost:80", help="GW-RePO API base URL (default: http://localhost:80)")
+    ap.add_argument("--endpoint", default=os.environ.get("GWREPO_URL", "http://localhost:80"), help="GW-RePO API base URL (default: $GWREPO_URL, else http://localhost:80)")
     ap.add_argument("--dry-run", action="store_true", help="print payloads, don't POST")
     args = ap.parse_args()
 
