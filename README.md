@@ -74,10 +74,14 @@ each covering one concern, with no overlap:
 ## Submit Workflow Data
 
 No plugin to install. Copy [`gwrepo.config`](gwrepo.config) into your pipeline (or
-`-c gwrepo.config`), fill in your institute / data-size tag / API key, and run:
+`-c gwrepo.config`), set your institute / data-size tag / API key, and run:
 
 ```bash
 export GWREPO_API_KEY=<your API_KEY from .env>
+nextflow secrets set GWREPO_API_KEY "$GWREPO_API_KEY"
+export GWREPO_INSTITUTE=DKFZ      # your institute (once per user)
+export GWREPO_DATA_SIZE=small     # this run's data-size tag
+# export GWREPO_URL=http://<host>:80   # if the API isn't on localhost:80
 nextflow run <pipeline> -c gwrepo.config
 ```
 
@@ -99,7 +103,8 @@ each importer does, or run them individually.
 ```groovy
 tower {
     enabled     = true
-    endpoint    = 'http://localhost:80/DKFZ/mixed'   // GW-RePO API base URL + /<institute>/<dataSizeTag>
+    // GW-RePO API base URL + /<institute>/<dataSizeTag>, from GWREPO_URL / GWREPO_INSTITUTE / GWREPO_DATA_SIZE
+    endpoint    = "${System.getenv('GWREPO_URL') ?: 'http://localhost:80'}/${System.getenv('GWREPO_INSTITUTE') ?: 'UNKNOWN'}/${System.getenv('GWREPO_DATA_SIZE') ?: 'mixed'}"
     accessToken = secrets.GWREPO_API_KEY             // or the GWREPO_API_KEY env var; any non-empty string
 }
 ```

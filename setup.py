@@ -36,7 +36,6 @@ POSTGRES_DB=gw_repo
 
 # Client Configuration
 API_BASE_URL=http://localhost:80
-INSTITUTE_ID=DKFZ  # Options: DKFZ, EMBL, LOCAL, NONE, UNKNOWN, or custom
 """
     
     with open(ENV_FILE, "w") as f:
