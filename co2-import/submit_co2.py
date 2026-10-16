@@ -170,11 +170,32 @@ def resolve_workflow_id(run_dir):
 
 
 def resolve_process_map(endpoint, api_key, workflow_id):
-    """task_id -> process_execution_id, from the ProcessExecution rows the tower
-    emulation endpoints already created for this workflow (task_id column added
-    for exactly this purpose)."""
+    """task_id -> [ProcessExecution rows], from the rows the tower emulation
+    endpoints already created for this workflow (task_id column added for exactly
+    this purpose). A list, because Nextflow numbers tasks from 1 on every launch:
+    after `-resume`, a task_id can also belong to a task that only ran in an
+    earlier launch of the same session -- see match_process()."""
     rows = get_json(endpoint, f"/processes/?workflow_execution_id={workflow_id}", api_key)
-    return {str(r["task_id"]): r["id"] for r in rows if r.get("task_id") is not None}
+    by_task_id = {}
+    for r in rows:
+        if r.get("task_id") is not None:
+            by_task_id.setdefault(str(r["task_id"]), []).append(r)
+    return by_task_id
+
+
+def match_process(candidates, name, status):
+    """The process_execution_id for one CO2 task among the rows sharing its
+    task_id: same process (CO2 `name` is `PROCESS (tag)`), then same status. A
+    task that executed in this launch (not CACHED) started after every task of an
+    earlier launch, so a remaining tie goes to the latest start_time. None if
+    still ambiguous."""
+    process = name.split(" (", 1)[0]
+    rows = [r for r in candidates if r.get("process_name") == process]
+    if len(rows) > 1:
+        rows = [r for r in rows if r.get("final_status") == status]
+    if len(rows) > 1 and status != "CACHED":
+        rows = [max(rows, key=lambda r: r.get("start_time") or 0)]
+    return rows[0]["id"] if len(rows) == 1 else None
 
 
 # --- file discovery -------------------------------------------------------
@@ -224,9 +245,10 @@ def main():
     posted, skipped, failed = 0, 0, 0
     for task in iter_tasks(tree):
         task_id = str(_value(task, "task_id"))
-        pid = processes.get(task_id)
+        name = str(_value(task, "name"))
+        pid = match_process(processes.get(task_id, []), name, _value(task, "status"))
         if not pid:
-            print(f"  ! task_id {task_id} ({_value(task, 'name')}) has no matching ProcessExecution row -- skipping")
+            print(f"  ! task_id {task_id} ({name}) has no unambiguous matching ProcessExecution row -- skipping")
             skipped += 1
             continue
         row = process_co2_row(task, pid)

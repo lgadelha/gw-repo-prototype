@@ -30,6 +30,7 @@ it on success if `cleanup = true` is explicitly set.
 """
 
 import argparse
+import glob
 import hashlib
 import json
 import os
@@ -140,18 +141,68 @@ def task_file_paths(lineage_dir, task_hash):
     return inputs, outputs
 
 
+def task_work_dir(lineage_dir, task_hash):
+    """<workDir>/<hash[:2]>/<hash[2:]>, with workDir from the task's WorkflowRun
+    record (so a custom `-w` is honoured), or None if the records are missing."""
+    task_run = _lineage_record(lineage_dir, task_hash)
+    if not task_run:
+        return None
+    workflow_run = _lineage_record(lineage_dir, task_run["spec"]["workflowRun"][len("lid://"):])
+    if not workflow_run:
+        return None
+    return Path(workflow_run["spec"]["metadata"]["workDir"]) / task_hash[:2] / task_hash[2:]
+
+
+def local_copy(path, work_dir):
+    """Remote inputs (https://..., and pipeline assets that nf-lineage records as
+    https://github.com/<repo>/tree/<commit>/... links) are recorded by their URL,
+    but Nextflow staged them into the task's work dir under the URL's file name --
+    hash that copy. Local paths are returned unchanged."""
+    if "://" not in path or work_dir is None:
+        return path
+    name = path.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+    direct = work_dir / name
+    if direct.exists():
+        return str(direct)
+    # `stageAs: 'input*/*'`-style staging (e.g. CAT_FASTQ) puts it one level down
+    for hit in sorted(work_dir.glob(f"*/{glob.escape(name)}")):
+        if hit.is_symlink():
+            return str(hit)
+    return str(direct)
+
+
 # --- hashing -----------------------------------------------------------------
 
-def sha256_file(path):
+_hash_cache = {}
+
+
+def sha256_path(path):
+    """SHA-256 of a file's content; for a directory, a SHA-256 over its sorted
+    entries' `<name>\\0<sha256>` lines (recursively, Merkle-style). Cached by real
+    path, so a file or directory staged into many tasks (symlinks to one copy),
+    or already hashed inside a parent directory, is read only once per run.
+    None if anything under `path` can't be read."""
+    real = os.path.realpath(path)
+    if real in _hash_cache:
+        return _hash_cache[real]
     try:
         h = hashlib.sha256()
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                h.update(chunk)
-        return h.hexdigest()
+        if os.path.isdir(real):
+            for name in sorted(os.listdir(real)):
+                child = sha256_path(os.path.join(real, name))
+                if child is None:
+                    return None
+                h.update(f"{name}\0{child}\n".encode())
+        else:
+            with open(real, "rb") as f:
+                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    h.update(chunk)
+        digest = h.hexdigest()
     except OSError as e:
         print(f"    ! could not read {path}: {e}")
-        return None
+        digest = None
+    _hash_cache[real] = digest
+    return digest
 
 
 def main():
@@ -186,7 +237,7 @@ def main():
     print(f"workflow {workflow_id}")
     print(f"lineage store {lineage_dir}")
 
-    posted, skipped, failed = 0, 0, 0
+    posted, skipped, failed, unhashed = 0, 0, 0, 0
     for proc in processes:
         process_id = proc["id"]
         prefix = f"{workflow_id}_"
@@ -200,15 +251,16 @@ def main():
             skipped += 1
             continue
 
+        work_dir = task_work_dir(lineage_dir, task_hash)
         for kind, paths, api_path in (("input", inputs, "/input_files/"), ("output", outputs, "/output_files/")):
             for path in paths:
-                if args.dry_run:
-                    print(f"  {process_id} {kind} {path}")
-                    posted += 1
-                    continue
-                sha256 = sha256_file(path)
+                # Unreadable files are still recorded (sha256 null), not dropped.
+                sha256 = sha256_path(local_copy(path, work_dir))
                 if sha256 is None:
-                    failed += 1
+                    unhashed += 1
+                if args.dry_run:
+                    print(f"  {process_id} {kind} {path} {sha256}")
+                    posted += 1
                     continue
                 row = {"process_execution_id": process_id, "filename": path, "sha256": sha256}
                 code, msg = post(args.endpoint, api_path, api_key, row)
@@ -218,7 +270,7 @@ def main():
                     print(f"  ! POST {api_path} for {process_id} ({path}) -> {code} {msg}")
                     failed += 1
 
-    print(f"done: {posted} file rows, {skipped} tasks skipped, {failed} failed")
+    print(f"done: {posted} file rows ({unhashed} without sha256), {skipped} tasks skipped, {failed} failed")
     sys.exit(1 if failed else 0)
 
 

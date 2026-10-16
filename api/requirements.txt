@@ -1,7 +1,7 @@
 fastapi[standard]
 pydantic
 sqlalchemy
-psycopg2
+psycopg[binary]
 xxhash
 sqlmodel
 python-dateutil

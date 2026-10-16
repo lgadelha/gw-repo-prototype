@@ -80,3 +80,13 @@ Python 3 standard library only (`urllib`, `json`, `argparse`, `hashlib`). No
   input (`process_execution_id`, `filename` — the full work-dir path, `sha256`).
 - `POST /output_files/` — one `ProcessExecutionOutputFile` row per file-typed task
   output, same shape.
+
+How `sha256` is computed:
+- **Remote inputs** (`https://…`, including pipeline assets nf-lineage records as
+  `github.com/<repo>/tree/<commit>/…` links) keep the URL as `filename`; the hash is
+  of the copy Nextflow staged into the task's work dir.
+- **Directories** (e.g. a `salmon/` index) get one SHA-256 over their sorted entries'
+  `<name>\0<sha256>` lines, recursively, built from the entries' own hashes.
+- Hashes are cached by real path, so a file or directory used by many tasks (or
+  inside an already-hashed directory) is read once per run.
+- A path that still can't be read is posted with `sha256` null rather than dropped.

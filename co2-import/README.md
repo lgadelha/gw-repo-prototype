@@ -27,6 +27,10 @@ python co2-import/submit_co2.py               # from the same directory
   that could write one to the pipeline's launch dir) — the `task_id → process_execution_id`
   map is instead resolved via `GET /processes/?workflow_execution_id=<id>` (each row's
   `task_id` column is populated by the tower-emulation endpoints for exactly this).
+  Nextflow restarts task numbering on every launch, so after `-resume` a `task_id`
+  can match several rows; the importer then also matches process name and status
+  (and, for tasks executed in this launch, the latest start time), and skips the
+  task with a warning if it's still ambiguous.
 - **`co2footprint_provenance*.json`** — written by `nf-co2footprint` (on by default).
 - **`co2footprint_summary*.txt`** — optional; the only source for the "car km" and "tree
   sequestration" figures on the workflow summary. Enable it with
