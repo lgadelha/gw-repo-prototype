@@ -75,8 +75,9 @@ def verify_tower_auth(authorization: Optional[str] = Header(None)):
 
 class ProcessExecutionParameterInput(SQLModel, table=True):
     process_execution_id: str = Field(foreign_key="processexecution.id", primary_key=True)
-    parameter_name: str = Field(primary_key=True)
-    parameter_value: str
+    parameter_name: str = Field(primary_key=True)  # value input name, dotted for map entries (`meta.single_end`), or a task global (`task.ext.args`)
+    parameter_value: str  # text form; booleans as true/false, lists as JSON
+    value_num: Optional[float] = None  # set when the value is a number
 
     process_execution: Optional["ProcessExecution"] = Relationship(back_populates="parameters")
 

@@ -3,12 +3,13 @@
 Post-run file-provenance importer for GW-RePO.
 
 Reads Nextflow's own `nf-lineage` local file store (`lineage.enabled = true`) to
-find each task's input/output file paths, computes a real SHA-256 of each file's
+find each task's input/output file paths and value parameters, computes a real SHA-256 of each file's
 content itself (nf-lineage's own `checksum` field is a metadata hash --
 murmur3(path + size + mtime), not content -- see doc/step0b-tower-lineage-wire-formats.md
 section 4), and POSTs `ProcessExecutionInputFile` / `ProcessExecutionOutputFile` rows
 to the GW-RePO API, matching the ProcessExecution rows the tower-emulation endpoints
-(api/main.py) already created during the run.
+(api/main.py) already created during the run. Also POSTs each task's `val` inputs
+and task globals (e.g. `task.ext.args`) as ProcessExecutionParameterInput rows.
 
 Usage:
     python lineage-import/submit_lineage.py [--run-dir .]
@@ -141,6 +142,37 @@ def task_file_paths(lineage_dir, task_hash):
     return inputs, outputs
 
 
+def _flatten(name, value):
+    """(name, text, num) rows; map entries get dotted names, nulls are dropped."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            yield from _flatten(f"{name}.{k}", v)
+    elif value is None:
+        return
+    elif isinstance(value, bool) or isinstance(value, list):
+        yield name, json.dumps(value), None
+    elif isinstance(value, (int, float)):
+        yield name, str(value), float(value)
+    else:
+        yield name, str(value), None
+
+
+def task_parameters(lineage_dir, task_hash):
+    """Value inputs (`val`, e.g. nf-core's `meta` map) and task globals (e.g.
+    `task.ext.args`) of one task, as (name, text, num) rows."""
+    task_run = _lineage_record(lineage_dir, task_hash)
+    if not task_run or task_run.get("kind") != "TaskRun":
+        return []
+    spec = task_run["spec"]
+    rows = []
+    for param in spec.get("input") or []:
+        if param.get("type") == "val":
+            rows.extend(_flatten(param["name"], param.get("value")))
+    for name, value in (spec.get("globalVars") or {}).items():
+        rows.extend(_flatten(name, value))
+    return rows
+
+
 def task_work_dir(lineage_dir, task_hash):
     """<workDir>/<hash[:2]>/<hash[2:]>, with workDir from the task's WorkflowRun
     record (so a custom `-w` is honoured), or None if the records are missing."""
@@ -241,7 +273,7 @@ def main():
     print(f"workflow {workflow_id}")
     print(f"lineage store {lineage_dir}")
 
-    posted, skipped, failed, unhashed = 0, 0, 0, 0
+    posted, skipped, failed, unhashed, params_posted = 0, 0, 0, 0, 0
     for proc in processes:
         process_id = proc["id"]
         prefix = f"{workflow_id}_"
@@ -275,7 +307,22 @@ def main():
                     print(f"  ! POST {api_path} for {process_id} ({path}) -> {code} {msg}")
                     failed += 1
 
-    print(f"done: {posted} file rows ({unhashed} without sha256), {skipped} tasks skipped, {failed} failed")
+        for name, text, num in task_parameters(lineage_dir, task_hash):
+            if args.dry_run:
+                print(f"  {process_id} param {name} = {text}")
+                params_posted += 1
+                continue
+            row = {"process_execution_id": process_id, "parameter_name": name,
+                   "parameter_value": text, "value_num": num}
+            code, msg = post(args.endpoint, "/parameters/", api_key, row)
+            if code and code < 300:
+                params_posted += 1
+            else:
+                print(f"  ! POST /parameters/ for {process_id} ({name}) -> {code} {msg}")
+                failed += 1
+
+    print(f"done: {posted} file rows ({unhashed} without sha256), {params_posted} parameter rows, "
+          f"{skipped} tasks skipped, {failed} failed")
     sys.exit(1 if failed else 0)
 
 

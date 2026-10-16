@@ -80,6 +80,15 @@ Python 3 standard library only (`urllib`, `json`, `argparse`, `hashlib`). No
   input (`process_execution_id`, `filename` — the full work-dir path, `sha256`).
 - `POST /output_files/` — one `ProcessExecutionOutputFile` row per file-typed task
   output, same shape.
+- `POST /parameters/` — one `ProcessExecutionParameterInput` row per task value
+  parameter, read back with `GET /parameters/{process_execution_id}`:
+  - `val` inputs, with map entries under dotted names (nf-core's `meta` map becomes
+    `meta.id`, `meta.single_end`, `meta.strandedness`, ...);
+  - task globals the script used, e.g. `task.ext.args` (the tool options set in config)
+    and `task.ext.prefix`.
+
+  `parameter_value` holds the text form (booleans as `true`/`false`, lists as JSON);
+  numbers are also in `value_num`. Null values are skipped.
 
 How `sha256` is computed:
 - **Remote inputs** (`https://…`, including pipeline assets nf-lineage records as
