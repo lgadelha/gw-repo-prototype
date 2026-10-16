@@ -6,7 +6,8 @@
 """
 One-command post-run upload for GW-RePO: runs lineage-import/submit_lineage.py,
 co2-import/submit_co2.py and multiqc-import/submit_multiqc.py back to back against
-the same pipeline run.
+the same pipeline run, then posts any --campaign / --annotate key=value
+annotations on the run.
 
 Usage:
     uv run submit_run.py [--run-dir .] [--endpoint http://localhost:80] [--dry-run]
@@ -27,10 +28,14 @@ convenience entry point on top of the other two scripts, not something else
 depends on it, so this tradeoff (needing `uv`) is scoped to just this one script.
 """
 
+import json
+import os
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import typer
 
@@ -47,6 +52,51 @@ def _run(script: Path, args: list, label: str) -> int:
     return subprocess.run([sys.executable, str(script), *args]).returncode
 
 
+def _resolve_workflow_id(run_dir: str) -> Optional[str]:
+    """sessionId (column 6) of the last line of <run-dir>/.nextflow/history, as in the importers."""
+    history = Path(run_dir) / ".nextflow" / "history"
+    if not history.is_file():
+        return None
+    lines = [l for l in history.read_text(encoding="utf-8").splitlines() if l.strip()]
+    cols = lines[-1].split("\t") if lines else []
+    return cols[5] if len(cols) > 5 else None
+
+
+def _annotate(annotations: List[str], endpoint: str, run_dir: str, workflow_id: Optional[str], dry_run: bool) -> int:
+    """POST each `key=value` as a workflow annotation; numeric values go to value_num."""
+    workflow_id = workflow_id or _resolve_workflow_id(run_dir)
+    if not workflow_id:
+        typer.echo(f"no workflow id -- {run_dir}/.nextflow/history not found and --workflow-id not given")
+        return 1
+    api_key = os.environ.get("GWREPO_API_KEY", "")
+    path = f"/workflows/{workflow_id}/annotations/"
+    failed = 0
+    for item in annotations:
+        key, sep, value = item.partition("=")
+        if not sep or not key:
+            typer.echo(f"  ! not key=value: {item}")
+            failed += 1
+            continue
+        try:
+            row = {"key": key, "value_num": float(value)}
+        except ValueError:
+            row = {"key": key, "value_text": value}
+        if dry_run:
+            typer.echo(f"  {workflow_id} {key} = {value}")
+            continue
+        req = urllib.request.Request(
+            endpoint.rstrip("/") + path, data=json.dumps(row).encode("utf-8"), method="POST",
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        )
+        try:
+            urllib.request.urlopen(req, timeout=30).close()
+            typer.echo(f"  {key} = {value}")
+        except (urllib.error.HTTPError, urllib.error.URLError) as e:
+            typer.echo(f"  ! POST {path} {key} -> {e}")
+            failed += 1
+    return 1 if failed else 0
+
+
 @app.command()
 def main(
     run_dir: str = typer.Option(".", help="dir the pipeline ran in"),
@@ -60,6 +110,12 @@ def main(
     skip_multiqc: bool = typer.Option(False, help="don't run multiqc-import (e.g. the pipeline has no MultiQC report)"),
     multiqc_data: Optional[str] = typer.Option(
         None, help="path to multiqc_data.json (default: newest under --run-dir)"
+    ),
+    campaign: Optional[str] = typer.Option(
+        None, envvar="GWREPO_CAMPAIGN", help="annotate the run with campaign=<value> (groups runs of a study)"
+    ),
+    annotate: List[str] = typer.Option(
+        [], "--annotate", help="annotate the run with key=value (repeatable)"
     ),
 ):
     """Steer the complete post-run upload to the GW-RePO API: file provenance
@@ -81,9 +137,14 @@ def main(
         extra = ["--multiqc-data", multiqc_data] if multiqc_data else []
         results["multiqc-import"] = _run(MULTIQC_SCRIPT, common + extra, "multiqc-import")
 
+    annotations = ([f"campaign={campaign}"] if campaign else []) + annotate
+    if annotations:
+        typer.echo("\n=== annotations ===")
+        results["annotations"] = _annotate(annotations, endpoint, run_dir, workflow_id, dry_run)
+
     typer.echo("\n=== summary ===")
     if not results:
-        typer.echo("  nothing ran -- --skip-lineage, --skip-co2 and --skip-multiqc all given")
+        typer.echo("  nothing ran -- --skip-lineage, --skip-co2 and --skip-multiqc all given, and no annotations")
         raise typer.Exit(code=0)
 
     failed = False

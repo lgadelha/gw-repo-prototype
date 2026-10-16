@@ -99,6 +99,10 @@ uv run submit_run.py --run-dir .
 Per-sample metrics come from [`multiqc-import`](multiqc-import/). See below for what
 each importer does, or run them individually.
 
+`--campaign <name>` (or `GWREPO_CAMPAIGN`) and `--annotate key=value` (repeatable) add
+annotations to the run, e.g. to group the runs of one study. Numeric values are stored as
+numbers. They can be run alone, after the fact, with all three `--skip-*` flags.
+
 ### 1. Live execution & resource metrics — `tower {}`
 
 ```groovy
@@ -114,7 +118,14 @@ This is Nextflow's own built-in Tower/Seqera Platform client — the API impleme
 the receiving side of that protocol. Streamed live, as the run proceeds:
 
 **Workflow** (`/trace/create`, `/begin`, `/complete`): run name, Nextflow version,
-revision, start time, duration, final state.
+revision, start time, duration, final state. At `/begin`, the pipeline's `params` are
+stored as workflow annotations (`params.<name>`; nested maps such as nf-core's `genomes`
+flattened with dots, null params skipped).
+
+Annotations are read with `GET /workflows/{id}/annotations/` (optional `?key=`), added
+with `POST /workflows/{id}/annotations/`, and filter runs with
+`GET /workflows/?annotation.<key>=<value>`, e.g. `?annotation.campaign=casp2010` or
+`?annotation.params.aligner=star_salmon` (repeat to combine).
 
 **Per task** (`/trace/{id}/progress`, `/heartbeat`): process name, module, container,
 exit status, requested vs. actual CPU / memory / time / disk, `%cpu`, `%mem`,

@@ -1,5 +1,5 @@
 import base64
-from fastapi import FastAPI, Depends, HTTPException, Security, Body, Header
+from fastapi import FastAPI, Depends, HTTPException, Security, Body, Header, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlmodel import SQLModel, Field, create_engine, Session, Relationship, select, delete
 from sqlalchemy import text, BigInteger
@@ -14,7 +14,8 @@ from models import (
     Workflowco2summary,
     Optimizationrule,
     Mlmodelmetadata,
-    Samplemetric
+    Samplemetric,
+    Workflowannotation
 )
 import json
 import numpy as np
@@ -173,8 +174,23 @@ def create_workflow(
     return db_obj
 
 @app.get("/workflows/", response_model=List[WorkflowExecution])
-def get_workflows(session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
-    return session.exec(select(WorkflowExecution)).all()
+def get_workflows(request: Request, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
+    """All workflows; `?annotation.<key>=<value>` (repeatable) keeps only runs with
+    that annotation, e.g. `?annotation.campaign=casp2010`."""
+    query = select(WorkflowExecution)
+    for name, value in request.query_params.multi_items():
+        if not name.startswith("annotation."):
+            continue
+        match = Workflowannotation.value_text == value
+        try:
+            match = match | (Workflowannotation.value_num == float(value))
+        except ValueError:
+            pass
+        query = query.where(WorkflowExecution.id.in_(
+            select(Workflowannotation.workflow_execution_id)
+            .where(Workflowannotation.key == name[len("annotation."):], match)
+        ))
+    return session.exec(query).all()
 
 @app.get("/workflows/{execution_id}", response_model=WorkflowExecution)
 def get_workflow(execution_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
@@ -265,6 +281,27 @@ def _workflow_row_from_payload(wf: dict, workflow_id: str, institute: str, data_
     )
 
 
+def _annotation(workflow_id: str, key: str, value) -> Workflowannotation:
+    """Numbers go to value_num, everything else to value_text (booleans as
+    true/false, lists as JSON)."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return Workflowannotation(workflow_execution_id=workflow_id, key=key, value_num=value)
+    if isinstance(value, (bool, list)):
+        value = json.dumps(value)
+    return Workflowannotation(workflow_execution_id=workflow_id, key=key, value_text=str(value))
+
+
+def _param_annotations(params, workflow_id: str, prefix: str = "params"):
+    """Flatten the tower payload's `workflow.params` into `params.<a>.<b>` rows;
+    null params are skipped."""
+    for name, value in (params or {}).items():
+        key = f"{prefix}.{name}"
+        if isinstance(value, dict):
+            yield from _param_annotations(value, workflow_id, key)
+        elif value is not None:
+            yield _annotation(workflow_id, key, value)
+
+
 def _upsert_tasks(tasks: List[dict], workflow_id: str, institute: str, data_size_tag: str, session: Session):
     for task in tasks:
         full_hash = _full_hash(task.get("workdir"))
@@ -334,6 +371,9 @@ def tower_trace_begin(
 ):
     wf = payload.get("workflow") or {}
     session.merge(_workflow_row_from_payload(wf, workflow_id, institute, data_size_tag))
+    session.flush()  # workflow row before its annotations (FK)
+    for annotation in _param_annotations(wf.get("params"), workflow_id):
+        session.merge(annotation)
     session.commit()
     return {"watchUrl": f"/{institute}/{data_size_tag}/workflows/{workflow_id}"}
 
@@ -694,6 +734,38 @@ def get_sample_metrics(
     query = select(Samplemetric).where(Samplemetric.workflow_execution_id == workflow_id)
     if sample:
         query = query.where(Samplemetric.sample == sample)
+    return session.exec(query).all()
+
+
+@app.post("/workflows/{workflow_id}/annotations/", response_model=Workflowannotation)
+def create_workflow_annotation(
+    workflow_id: str,
+    annotation: Workflowannotation,
+    session: Session = Depends(get_session),
+    api_key: str = Depends(verify_api_key)
+):
+    """Add or replace one key-value annotation on a workflow (e.g. campaign)."""
+    workflow = session.get(WorkflowExecution, workflow_id)
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    annotation.workflow_execution_id = workflow_id
+    db_obj = session.merge(annotation)
+    session.commit()
+    session.refresh(db_obj)
+    return db_obj
+
+@app.get("/workflows/{workflow_id}/annotations/", response_model=List[Workflowannotation])
+def get_workflow_annotations(
+    workflow_id: str,
+    key: Optional[str] = None,
+    session: Session = Depends(get_session),
+    api_key: str = Depends(verify_api_key)
+):
+    """Annotations of a workflow (params and user annotations), optionally one key."""
+    query = select(Workflowannotation).where(Workflowannotation.workflow_execution_id == workflow_id)
+    if key:
+        query = query.where(Workflowannotation.key == key)
     return session.exec(query).all()
 
 
