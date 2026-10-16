@@ -176,33 +176,37 @@ def local_copy(path, work_dir):
 _hash_cache = {}
 
 
-def sha256_path(path):
-    """SHA-256 of a file's content; for a directory, a SHA-256 over its sorted
-    entries' `<name>\\0<sha256>` lines (recursively, Merkle-style). Cached by real
-    path, so a file or directory staged into many tasks (symlinks to one copy),
-    or already hashed inside a parent directory, is read only once per run.
-    None if anything under `path` can't be read."""
+def hash_and_size(path):
+    """(sha256, size_bytes) of a file's content; for a directory, a SHA-256 over
+    its sorted entries' `<name>\\0<sha256>` lines (recursively, Merkle-style) and
+    the sum of its entries' sizes. Cached by real path, so a file or directory
+    staged into many tasks (symlinks to one copy), or already hashed inside a
+    parent directory, is read only once per run. (None, None) if anything under
+    `path` can't be read."""
     real = os.path.realpath(path)
     if real in _hash_cache:
         return _hash_cache[real]
     try:
         h = hashlib.sha256()
+        size = 0
         if os.path.isdir(real):
             for name in sorted(os.listdir(real)):
-                child = sha256_path(os.path.join(real, name))
+                child, child_size = hash_and_size(os.path.join(real, name))
                 if child is None:
-                    return None
+                    return None, None
                 h.update(f"{name}\0{child}\n".encode())
+                size += child_size
         else:
             with open(real, "rb") as f:
                 for chunk in iter(lambda: f.read(1024 * 1024), b""):
                     h.update(chunk)
-        digest = h.hexdigest()
+                    size += len(chunk)
+        result = (h.hexdigest(), size)
     except OSError as e:
         print(f"    ! could not read {path}: {e}")
-        digest = None
-    _hash_cache[real] = digest
-    return digest
+        result = (None, None)
+    _hash_cache[real] = result
+    return result
 
 
 def main():
@@ -255,14 +259,15 @@ def main():
         for kind, paths, api_path in (("input", inputs, "/input_files/"), ("output", outputs, "/output_files/")):
             for path in paths:
                 # Unreadable files are still recorded (sha256 null), not dropped.
-                sha256 = sha256_path(local_copy(path, work_dir))
+                sha256, size_bytes = hash_and_size(local_copy(path, work_dir))
                 if sha256 is None:
                     unhashed += 1
                 if args.dry_run:
-                    print(f"  {process_id} {kind} {path} {sha256}")
+                    print(f"  {process_id} {kind} {path} {sha256} {size_bytes}")
                     posted += 1
                     continue
-                row = {"process_execution_id": process_id, "filename": path, "sha256": sha256}
+                row = {"process_execution_id": process_id, "filename": path, "sha256": sha256,
+                       "size_bytes": size_bytes}
                 code, msg = post(args.endpoint, api_path, api_key, row)
                 if code and code < 300:
                     posted += 1

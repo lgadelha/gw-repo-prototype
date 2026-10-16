@@ -4,8 +4,9 @@
 # dependencies = ["typer"]
 # ///
 """
-One-command post-run upload for GW-RePO: runs lineage-import/submit_lineage.py and
-co2-import/submit_co2.py back to back against the same pipeline run.
+One-command post-run upload for GW-RePO: runs lineage-import/submit_lineage.py,
+co2-import/submit_co2.py and multiqc-import/submit_multiqc.py back to back against
+the same pipeline run.
 
 Usage:
     uv run submit_run.py [--run-dir .] [--endpoint http://localhost:80] [--dry-run]
@@ -38,6 +39,7 @@ app = typer.Typer(add_completion=False)
 REPO_ROOT = Path(__file__).resolve().parent
 LINEAGE_SCRIPT = REPO_ROOT / "lineage-import" / "submit_lineage.py"
 CO2_SCRIPT = REPO_ROOT / "co2-import" / "submit_co2.py"
+MULTIQC_SCRIPT = REPO_ROOT / "multiqc-import" / "submit_multiqc.py"
 
 
 def _run(script: Path, args: list, label: str) -> int:
@@ -55,10 +57,15 @@ def main(
     dry_run: bool = typer.Option(False, "--dry-run", help="print what would be POSTed, don't POST"),
     skip_lineage: bool = typer.Option(False, help="don't run lineage-import"),
     skip_co2: bool = typer.Option(False, help="don't run co2-import (e.g. nf-co2footprint wasn't enabled)"),
+    skip_multiqc: bool = typer.Option(False, help="don't run multiqc-import (e.g. the pipeline has no MultiQC report)"),
+    multiqc_data: Optional[str] = typer.Option(
+        None, help="path to multiqc_data.json (default: newest under --run-dir)"
+    ),
 ):
     """Steer the complete post-run upload to the GW-RePO API: file provenance
-    (lineage-import) and CO2/energy (co2-import), both matched to the
-    ProcessExecution rows the tower-emulation endpoints already created live."""
+    (lineage-import), CO2/energy (co2-import) and per-sample MultiQC metrics
+    (multiqc-import), all matched to the workflow and ProcessExecution rows the
+    tower-emulation endpoints already created live."""
     common = ["--run-dir", run_dir, "--endpoint", endpoint]
     if workflow_id:
         common += ["--workflow-id", workflow_id]
@@ -70,10 +77,13 @@ def main(
         results["lineage-import"] = _run(LINEAGE_SCRIPT, common, "lineage-import")
     if not skip_co2:
         results["co2-import"] = _run(CO2_SCRIPT, common, "co2-import")
+    if not skip_multiqc:
+        extra = ["--multiqc-data", multiqc_data] if multiqc_data else []
+        results["multiqc-import"] = _run(MULTIQC_SCRIPT, common + extra, "multiqc-import")
 
     typer.echo("\n=== summary ===")
     if not results:
-        typer.echo("  nothing ran -- both --skip-lineage and --skip-co2 given")
+        typer.echo("  nothing ran -- --skip-lineage, --skip-co2 and --skip-multiqc all given")
         raise typer.Exit(code=0)
 
     failed = False

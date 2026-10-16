@@ -54,6 +54,16 @@ class Workflowco2summary(SQLModel, table=True):
     tree_sequestration_time_sec: float
 
 
+class Samplemetric(SQLModel, table=True):
+    """Per-sample domain metric (e.g. MultiQC general stats), key-value per sample.
+    `sample` matches ProcessExecution.tag for nf-core pipelines (the meta.id)."""
+    workflow_execution_id: str = Field(foreign_key="workflowexecution.id", primary_key=True)
+    sample: str = Field(primary_key=True)
+    key: str = Field(primary_key=True)
+    value_num: Optional[float] = None
+    value_text: Optional[str] = None
+
+
 class Optimizationrule(SQLModel, table=True):
     """ML-based or manual optimization rules per institute."""
     id: Optional[int] = Field(default=None, primary_key=True)

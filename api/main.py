@@ -2,7 +2,7 @@ import base64
 from fastapi import FastAPI, Depends, HTTPException, Security, Body, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlmodel import SQLModel, Field, create_engine, Session, Relationship, select, delete
-from sqlalchemy import text
+from sqlalchemy import text, BigInteger
 from typing import Optional, List, Annotated, Dict
 from datetime import datetime, timezone
 import os, time
@@ -13,7 +13,8 @@ from models import (
     Co2footprint,
     Workflowco2summary,
     Optimizationrule,
-    Mlmodelmetadata
+    Mlmodelmetadata,
+    Samplemetric
 )
 import json
 import numpy as np
@@ -82,6 +83,7 @@ class ProcessExecutionInputFile(SQLModel, table=True):
     process_execution_id: str = Field(foreign_key="processexecution.id", primary_key=True)
     filename: str = Field(primary_key=True)
     sha256: Optional[str] = None
+    size_bytes: Optional[int] = Field(default=None, sa_type=BigInteger)  # directories: sum of their files
 
     process_execution: Optional["ProcessExecution"] = Relationship(back_populates="input_files")
 
@@ -89,6 +91,7 @@ class ProcessExecutionOutputFile(SQLModel, table=True):
     process_execution_id: str = Field(foreign_key="processexecution.id", primary_key=True)
     filename: str = Field(primary_key=True)
     sha256: Optional[str] = None
+    size_bytes: Optional[int] = Field(default=None, sa_type=BigInteger)  # directories: sum of their files
 
     process_execution: Optional["ProcessExecution"] = Relationship(back_populates="output_files")
 
@@ -112,6 +115,7 @@ class ProcessExecution(SQLModel, table=True):
     institute_id: Optional[str] = Field(default="UNKNOWN", foreign_key="institut.id")
     task_id: Optional[int] = None  # Nextflow's per-run task id (tower payload's `taskId`); lets post-run importers (co2-import, lineage-import) resolve this row without a marker file
     process_name: str
+    tag: Optional[str] = None  # Nextflow task tag; nf-core sets it to the sample id (meta.id), matching Samplemetric.sample
     module_name: Optional[str] = None
     container_name: Optional[str] = None
     final_status: str
@@ -284,6 +288,7 @@ def _upsert_tasks(tasks: List[dict], workflow_id: str, institute: str, data_size
             storage_requested=_bytes_to_mb(task.get("disk")),
             memory_requested=_bytes_to_mb(task.get("memory")),
             queue_name=_str_field(task.get("queue")),
+            tag=_str_field(task.get("tag")),
             percent_cpu=task.get("pcpu") or 0.0,
             percent_memory=task.get("pmem") or 0.0,
             peak_rss=_bytes_to_mb(task.get("peakRss")) or 0.0,
@@ -659,6 +664,37 @@ def get_workflow_co2_summary(
         raise HTTPException(status_code=404, detail="CO2 summary not found")
     return co2_data
     return co2_data
+
+@app.post("/workflows/{workflow_id}/sample_metrics/", response_model=Samplemetric)
+def create_sample_metric(
+    workflow_id: str,
+    metric: Samplemetric,
+    session: Session = Depends(get_session),
+    api_key: str = Depends(verify_api_key)
+):
+    """Submit one per-sample domain metric (e.g. from MultiQC) for a workflow."""
+    workflow = session.get(WorkflowExecution, workflow_id)
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    metric.workflow_execution_id = workflow_id
+    db_obj = session.merge(metric)
+    session.commit()
+    session.refresh(db_obj)
+    return db_obj
+
+@app.get("/workflows/{workflow_id}/sample_metrics/", response_model=List[Samplemetric])
+def get_sample_metrics(
+    workflow_id: str,
+    sample: Optional[str] = None,
+    session: Session = Depends(get_session),
+    api_key: str = Depends(verify_api_key)
+):
+    """Per-sample domain metrics for a workflow, optionally for one sample."""
+    query = select(Samplemetric).where(Samplemetric.workflow_execution_id == workflow_id)
+    if sample:
+        query = query.where(Samplemetric.sample == sample)
+    return session.exec(query).all()
 
 
 # ==================== ML Model Endpoints ====================

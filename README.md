@@ -85,8 +85,8 @@ export GWREPO_DATA_SIZE=small     # this run's data-size tag
 nextflow run <pipeline> -c gwrepo.config
 ```
 
-Once the run finishes, `submit_run.py` runs both post-run importers (file
-provenance + CO2) in one command. It declares its one dependency (`typer`) inline
+Once the run finishes, `submit_run.py` runs the post-run importers (file
+provenance + CO2 + per-sample MultiQC metrics) in one command. It declares its one dependency (`typer`) inline
 ([PEP 723](https://peps.python.org/pep-0723/)), so with
 [`uv`](https://docs.astral.sh/uv/) installed there's no separate install step:
 
@@ -94,8 +94,9 @@ provenance + CO2) in one command. It declares its one dependency (`typer`) inlin
 uv run submit_run.py --run-dir .
 ```
 
-`--skip-co2` / `--skip-lineage` run just one (e.g. if `nf-co2footprint` wasn't
-enabled for this run); `--dry-run` previews without POSTing. See below for what
+`--skip-lineage` / `--skip-co2` / `--skip-multiqc` leave one out (e.g. if
+`nf-co2footprint` wasn't enabled for this run); `--dry-run` previews without POSTing.
+Per-sample metrics come from [`multiqc-import`](multiqc-import/). See below for what
 each importer does, or run them individually.
 
 ### 1. Live execution & resource metrics — `tower {}`

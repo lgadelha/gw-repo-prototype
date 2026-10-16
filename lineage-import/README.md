@@ -87,6 +87,8 @@ How `sha256` is computed:
   of the copy Nextflow staged into the task's work dir.
 - **Directories** (e.g. a `salmon/` index) get one SHA-256 over their sorted entries'
   `<name>\0<sha256>` lines, recursively, built from the entries' own hashes.
+- `size_bytes` is recorded in the same pass: a file's size, or for a directory the
+  sum of its files' sizes.
 - Hashes are cached by real path, so a file or directory used by many tasks (or
   inside an already-hashed directory) is read once per run.
 - A path that still can't be read is posted with `sha256` null rather than dropped.
