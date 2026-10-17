@@ -1,12 +1,14 @@
 """Shared by all pages: API access (cached 30 s), finished-attempt filter, process
-name normalisation and display formatting."""
+name normalisation, display formatting and the pan/zoom graph view."""
 
+import json
 import os
 import sys
 
 import pandas as pd
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 sys.path.append('api')
 from nfcore_modules import normalize_module_name  # noqa: E402
@@ -81,3 +83,31 @@ def fmt_mb(mb) -> str:
     if mb is None or pd.isna(mb):
         return '–'
     return f"{mb / 1024:.2f} GB" if mb >= 1024 else f"{mb:.0f} MB"
+
+
+GRAPH_VIEW = """
+<div id="g" style="width:100%;height:{height}px;background:#fff;border:1px solid #ddd;border-radius:4px"></div>
+<script src="https://cdn.jsdelivr.net/npm/@viz-js/viz@3.11.0/lib/viz-standalone.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.2/dist/svg-pan-zoom.min.js"></script>
+<script>
+Viz.instance().then(viz => {{
+  const svg = viz.renderSVGElement({dot});
+  svg.setAttribute('width', '100%'); svg.setAttribute('height', '100%');
+  const box = document.getElementById('g');
+  box.appendChild(svg);
+  let pz = null;  // created once visible: a graph in a hidden tab has no size to fit to
+  new ResizeObserver(() => {{
+    if (!box.clientWidth) return;
+    if (!pz) pz = svgPanZoom(svg, {{controlIconsEnabled: true, fit: true, center: true, minZoom: 0.1, maxZoom: 20}});
+    else {{ pz.resize(); pz.fit(); pz.center(); }}
+  }}).observe(box);
+}});
+</script>
+"""
+
+
+def graph_view(dot: str, height: int = 600):
+    """Graphviz DOT drawn in the browser (viz.js) with mouse-wheel zoom, drag to pan
+    and +/−/reset buttons (svg-pan-zoom); node tooltips are kept."""
+    components.html(GRAPH_VIEW.format(height=height, dot=json.dumps(dot).replace('</', '<\\/')),
+                    height=height + 10)

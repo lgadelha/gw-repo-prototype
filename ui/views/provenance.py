@@ -7,7 +7,7 @@ import streamlit as st
 
 import provgraph as pg
 import runprofile as prof
-from common import api_get, fmt_duration, fmt_mb
+from common import api_get, fmt_duration, fmt_mb, graph_view
 
 MAX_SUBGRAPH_NODES = 200
 MAX_FILE_LOOKUPS = 50
@@ -66,11 +66,10 @@ def _process_graph(tasks, internal, path):
     nodes, agg = pg.process_graph(tasks, internal)
     proc = dict(zip(tasks['id'], tasks['process_name']))
     on_path = [proc[t] for t in path]
-    st.graphviz_chart(pg.process_dot(nodes, agg, metric, highlight=set(on_path),
-                                     highlight_edges=set(zip(on_path, on_path[1:]))),
-                      width="stretch")
+    graph_view(pg.process_dot(nodes, agg, metric, highlight=set(on_path),
+                              highlight_edges=set(zip(on_path, on_path[1:]))), height=700)
     st.caption(f"{len(nodes)} processes, {len(agg)} producer → consumer links (labels: files · bytes read). "
-               "Red outline: processes on the critical path.")
+               "Red outline: processes on the critical path. Scroll to zoom, drag to pan.")
 
 
 def _critical_path(tasks, path, total, run):
@@ -123,7 +122,7 @@ def _lineage(focus, tasks, run, run_labels):
         st.warning(f"{len(nodes)} tasks are too many to draw; showing direct neighbours only.")
         edges = edges[(edges['producer_id'] == focus['id']) | (edges['consumer_id'] == focus['id'])]
         nodes = nodes[nodes['id'].isin(set(edges['producer_id']) | set(edges['consumer_id']) | {focus['id']})]
-    st.graphviz_chart(pg.task_dot(nodes, edges, focus['id'], run_labels), width="stretch")
+    graph_view(pg.task_dot(nodes, edges, focus['id'], run_labels), height=500)
     st.caption("Orange: the selected task. Dashed blue: matched by content across runs. Red fill: not finished.")
     other = nodes[nodes['workflow_execution_id'] != run['id']]
     if not other.empty:
