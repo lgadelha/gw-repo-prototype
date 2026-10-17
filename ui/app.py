@@ -3,14 +3,17 @@ refresh) and page wiring. Pages are ui/nav/*.py; their rendering code is in
 ui/views/, pure computations in ui/runprofile.py. See PLAN-frontend.md."""
 
 import os
+import time
 
 import pandas as pd
 import streamlit as st
 
-from common import api_get, api_key
+from common import api_get, api_key, clear_api_cache
 from views import runs
 
 st.set_page_config(page_title="GW-RePO (Genomic Workflow Resource and Parameter Optimization)", layout="wide")
+
+REFRESH_S = 15
 
 if 'api_key' not in st.session_state:
     st.session_state['api_key'] = os.getenv("API_KEY", "")
@@ -24,7 +27,8 @@ navigation = st.navigation({
     "Observability": [st.Page("nav/runs.py", title="Runs", icon="📋", url_path="runs", default=True),
                       st.Page("nav/run_detail.py", title="Run detail", icon="🔍", url_path="run"),
                       st.Page("nav/provenance.py", title="Provenance", icon="🧬", url_path="provenance"),
-                      st.Page("nav/samples.py", title="Samples", icon="🧪", url_path="samples")],
+                      st.Page("nav/samples.py", title="Samples", icon="🧪", url_path="samples"),
+                      st.Page("nav/energy.py", title="Energy & CO2", icon="🌱", url_path="energy")],
     "Across runs": [st.Page("nav/process_profile.py", title="Process profile", icon="⚙️", url_path="process"),
                     st.Page("nav/compare.py", title="Compare runs", icon="⚖️", url_path="compare"),
                     st.Page("nav/analytics.py", title="Process analytics", icon="📈", url_path="analytics")],
@@ -77,6 +81,19 @@ with st.sidebar:
     if st.button("🔄 Refresh data", help="Data is cached for 30 s; this fetches it now"):
         st.cache_data.clear()
         st.rerun()
+    st.session_state['_last_full_run'] = time.time()
+    running = not filtered_runs.empty and (filtered_runs['state'] == 'RUNNING').any()
+    if running and st.toggle(f"Auto-refresh every {REFRESH_S} s", value=True, key='auto_refresh',
+                             help="A run in the filter is still running"):
+
+        @st.fragment(run_every=REFRESH_S)
+        def _tick():
+            # The fragment also runs with every full rerun; only a timer tick reloads the page.
+            if time.time() - st.session_state.get('_last_full_run', 0) >= REFRESH_S - 1:
+                clear_api_cache()
+                st.rerun(scope="app")
+
+        _tick()
 
 if not api_key():
     st.warning("Please enter your API key in the sidebar to authenticate.")

@@ -135,7 +135,9 @@ def _inspector(focus, tasks, edges, run, run_labels):
     st.subheader(focus['task_name'])
     meta = {'Process': focus['process_name'], 'Tag': focus.get('tag'), 'Status': focus['final_status'],
             'Exit code': focus['exit_code'], 'Attempt': focus.get('attempt'), 'Container': focus.get('container_name'),
-            'Code checksum': focus.get('code_checksum'), 'Started': focus['start']}
+            'Code checksum': focus.get('code_checksum'), 'Started': focus['start'],
+            'Queue wait (s)': focus.get('queue_wait_s'), 'Executor': focus.get('executor'),
+            'Native job id': focus.get('native_id'), 'CPU model': focus.get('cpu_model')}
     st.dataframe(pd.DataFrame({'Field': list(meta), 'Value': [str(v) if pd.notna(v) else '–' for v in meta.values()]}),
                  hide_index=True, width="stretch")
 

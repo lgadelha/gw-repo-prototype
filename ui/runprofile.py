@@ -26,13 +26,23 @@ def _ratio(used: pd.Series, requested: pd.Series) -> pd.Series:
     return used / requested.where(requested > 0)
 
 
-def add_task_metrics(tasks: pd.DataFrame) -> pd.DataFrame:
+def add_task_metrics(tasks: pd.DataFrame, now=None) -> pd.DataFrame:
     """Derived per-task columns: start/end datetimes (end = start + realtime),
-    cores used, CPU/memory/time efficiency (used / requested), process short name
-    and subworkflow, input/output MB, CO2e in g."""
+    queue wait (start - submit), cores used, CPU/memory/time efficiency (used /
+    requested), process short name and subworkflow, input/output MB, CO2e in g.
+    A RUNNING task's end is `now` (default: the current time), as its realtime is
+    only reported when it finishes."""
     df = tasks.copy()
+    # The API stores 0 when a task has no start yet (submitted or pending): not started.
+    df['start_time'] = df['start_time'].where(df['start_time'] > 0)
+    if 'submit_time' not in df.columns:
+        df['submit_time'] = np.nan
+    df['queue_wait_s'] = (df['start_time'] - df['submit_time']).where(lambda w: w >= 0)
     df['start'] = pd.to_datetime(df['start_time'], unit='s', errors='coerce')
     df['end'] = df['start'] + pd.to_timedelta(df['realtime'].fillna(0), unit='s')
+    now = pd.Timestamp.now(tz='UTC').tz_localize(None) if now is None else now
+    running = (df['final_status'] == 'RUNNING') & df['start'].notna()
+    df.loc[running, 'end'] = df.loc[running, 'end'].clip(lower=now)
     df['cores_used'] = df['percent_cpu'] / 100.0
     for name, (requested, used, _) in RESOURCES.items():
         df[f'{name}_eff'] = _ratio(df[used], df[requested])
@@ -101,6 +111,7 @@ def process_table(tasks: pd.DataFrame) -> pd.DataFrame:
         'peak_rss_max_mb': grouped['peak_rss'].max(),
         'memory_eff_median': grouped['memory_eff'].median(),
         'time_eff_median': grouped['time_eff'].median(),
+        'queue_wait_median_s': grouped['queue_wait_s'].median(),
         'input_mb': grouped['input_mb'].sum(min_count=1),
         'output_mb': grouped['output_mb'].sum(min_count=1),
         'cpu_hours': grouped['cpu_hours'].sum(min_count=1),

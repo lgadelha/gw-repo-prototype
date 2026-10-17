@@ -126,6 +126,11 @@ class ProcessExecution(SQLModel, table=True):
     task_name: Optional[str] = None  # Nextflow task name, "<process> (<tag or index>)"; the same for every attempt of a task
     attempt: Optional[int] = None  # 1 for the first try, 2+ for retries (each retry is its own row, task_id and work dir)
     code_checksum: Optional[str] = None  # nf-lineage codeChecksum of the process code, the same for all its tasks; set post-run by lineage-import
+    submit_time: Optional[float] = None  # epoch s; start_time - submit_time = time waiting in the executor's queue
+    complete_time: Optional[float] = None  # epoch s
+    executor: Optional[str] = None  # e.g. local, slurm, awsbatch
+    native_id: Optional[str] = None  # the executor's job id (a process id for local)
+    cpu_model: Optional[str] = None  # CPU of the node that ran the task
     module_name: Optional[str] = None
     container_name: Optional[str] = None
     final_status: str
@@ -339,6 +344,17 @@ def get_task_profile(workflow_id: str, session: Session = Depends(get_session), 
     """
     return [dict(r._mapping) for r in session.execute(text(query), {"workflow_id": workflow_id})]
 
+@app.get("/workflows/{workflow_id}/co2/tasks")
+def get_workflow_task_co2(workflow_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
+    """Per-task CO2 rows of a run (nf-co2footprint, via co2-import), with the task's
+    process name, task name and tag."""
+    query = """
+    SELECT c.*, p.process_name, p.task_name, p.tag
+    FROM co2footprint c JOIN processexecution p ON p.id = c.process_execution_id
+    WHERE p.workflow_execution_id = :workflow_id
+    """
+    return [dict(r._mapping) for r in session.execute(text(query), {"workflow_id": workflow_id})]
+
 @app.get("/workflows/{workflow_id}/logical_tasks")
 def get_logical_tasks(workflow_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
     """The run's rows of the logical_task view (one per task, over its attempts)."""
@@ -475,8 +491,10 @@ def _workflow_row_from_payload(wf: dict, workflow_id: str, institute: str, data_
     /trace/create echoed back) is the fallback if `wf.sessionId` is somehow
     missing from the payload, so a malformed/partial `workflow` object can't
     crash the request with a NOT NULL violation on the primary key."""
+    # `success` is false at /begin too (not succeeded *yet*): the run has ended only
+    # once `complete` is set, so until then final_state stays null (running).
     success = wf.get("success")
-    final_state = None if success is None else ("COMPLETED" if success else "FAILED")
+    final_state = ("COMPLETED" if success else "FAILED") if wf.get("complete") else None
     return WorkflowExecution(
         id=wf.get("sessionId") or workflow_id,
         institute_id=institute,
@@ -544,6 +562,11 @@ def _upsert_tasks(tasks: List[dict], workflow_id: str, institute: str, data_size
             queue_name=_str_field(task.get("queue")),
             tag=_str_field(task.get("tag")),
             task_name=_str_field(task.get("name")),
+            submit_time=_iso_to_epoch(task.get("submit")),
+            complete_time=_iso_to_epoch(task.get("complete")),
+            executor=_str_field(task.get("executor")),
+            native_id=_str_field(task.get("nativeId")),
+            cpu_model=_str_field(task.get("cpuModel")),
             attempt=task.get("attempt"),
             percent_cpu=task.get("pcpu") or 0.0,
             percent_memory=task.get("pmem") or 0.0,

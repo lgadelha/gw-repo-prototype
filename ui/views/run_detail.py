@@ -50,7 +50,7 @@ def render(run: pd.Series):
 
 
 def _kpis(run, tasks, critical):
-    c = st.columns(4)
+    c = st.columns(5)
     c[0].metric("Wall time", fmt_duration(run['duration']), help="From the workflow's begin to complete")
     startup, span = prof.task_span(tasks, run['start_time'])
     c[0].caption(f"State: **{run['state']}**" + (f" · first task after {fmt_duration(startup)}, tasks then ran "
@@ -65,6 +65,15 @@ def _kpis(run, tasks, critical):
     if pd.notna(used) and allocated:
         c[2].caption(f"{100 * used / allocated:.0f}% of {allocated:.3f} allocated (realtime × CPUs requested)")
     c[3].metric("Peak task memory", fmt_mb(tasks['peak_rss'].max()))
+    waits = tasks['queue_wait_s'].dropna()
+    c[4].metric("Queue wait (median)", fmt_duration(waits.median()) if not waits.empty else '–',
+                help="Start − submit: time a task waited in the executor's queue")
+    if not waits.empty:
+        c[4].caption(f"max {fmt_duration(waits.max())}")
+    hosts = [f"{e}: {', '.join(sorted(tasks.loc[tasks['executor'] == e, 'cpu_model'].dropna().unique())) or '?'}"
+             for e in sorted(tasks['executor'].dropna().unique())] if 'executor' in tasks else []
+    if hosts:
+        st.caption("Executor and CPU model: " + " · ".join(hosts))
     c = st.columns(5)
     c[4].metric("Critical path", fmt_duration(critical),
                 help="Longest chain of dependent tasks, by Nextflow duration (see Provenance)")
@@ -95,7 +104,8 @@ def _timeline(tasks):
         df, x_start='start', x_end='bar_end', y='task_name', color=color,
         pattern_shape=df['finished'].map({True: 'finished', False: 'not finished'}),
         hover_data={'task_name': True, 'attempt': True, 'exit_code': True, 'cpus_requested': True,
-                    'cores_used': ':.2f', 'memory_requested': ':.0f', 'peak_rss': ':.0f', 'realtime': ':.1f'},
+                    'cores_used': ':.2f', 'memory_requested': ':.0f', 'peak_rss': ':.0f', 'realtime': ':.1f',
+                    'queue_wait_s': ':.1f', 'native_id': True},
         labels={'task_name': 'Task', 'process': 'Process', 'final_status': 'Status',
                 'pattern_shape': 'Attempt'},
     )
@@ -155,6 +165,7 @@ def _process_table(tasks):
             'peak_rss_max_mb': st.column_config.NumberColumn('Peak RSS max (MB)', format="%.0f"),
             'memory_eff_median': st.column_config.ProgressColumn('Memory efficiency', **pct),
             'time_eff_median': st.column_config.ProgressColumn('Time efficiency', **pct),
+            'queue_wait_median_s': st.column_config.NumberColumn('Queue wait median (s)', format="%.1f"),
             'input_mb': st.column_config.NumberColumn('Input (MB)', format="%.1f"),
             'output_mb': st.column_config.NumberColumn('Output (MB)', format="%.1f"),
             'cpu_hours': st.column_config.NumberColumn('CPU-hours', format="%.4f"),

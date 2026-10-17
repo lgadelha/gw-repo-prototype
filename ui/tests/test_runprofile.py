@@ -44,6 +44,33 @@ def test_task_metrics():
     assert a['cpu_eff'] == 0.75 and a['memory_eff'] == 0.5 and a['time_eff'] == 0.1
     assert (a['end'] - a['start']).total_seconds() == 10
     assert list(df['finished']) == [True, True, False, True]
+    assert df['queue_wait_s'].isna().all()             # no submit_time in these rows
+
+
+def test_not_started_tasks():
+    rows = tasks()
+    rows.loc[3, 'start_time'] = 0.0                     # the API's placeholder for "no start yet"
+    df = prof.add_task_metrics(rows)
+    assert pd.isna(df.loc[3, 'start']) and pd.isna(df.loc[3, 'queue_wait_s'])
+    startup, _ = prof.task_span(df, T0 - 60)
+    assert startup == 60                                 # not pulled back to 1970
+    assert prof.concurrency(df)['time'].min() == pd.to_datetime(T0, unit='s')
+
+
+def test_running_task_ends_now():
+    rows = tasks()
+    rows.loc[1, ['final_status', 'realtime']] = ['RUNNING', 0]
+    now = pd.to_datetime(T0 + 12, unit='s')
+    df = prof.add_task_metrics(rows, now=now)
+    assert df.loc[1, 'end'] == now
+    assert at(prof.concurrency(df), 11, 'running') == 1     # B still counted as running at T0 + 11
+
+
+def test_queue_wait():
+    rows = tasks().assign(submit_time=lambda d: d['start_time'] - [2, 0, 5, -1])
+    df = prof.add_task_metrics(rows)
+    assert list(df['queue_wait_s'].fillna(-99)) == [2, 0, 5, -99]   # a negative wait (clock skew) is dropped
+    assert prof.process_table(df).set_index('process_name').loc['WF:B', 'queue_wait_median_s'] == 0
 
 
 def test_concurrency():

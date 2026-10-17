@@ -27,13 +27,19 @@ def _cached_get(path: str, key: str, params: tuple):
     return response.json()
 
 
-def api_get(path: str, **params):
-    """GET an API path (cached 30 s per key and parameters); None after showing the error."""
+def api_get(path: str, _quiet: bool = False, **params):
+    """GET an API path (cached 30 s per key and parameters); None after showing the
+    error, or silently with `_quiet` (for optional data, e.g. a 404)."""
     try:
         return _cached_get(path, api_key(), tuple(sorted(params.items())))
     except requests.RequestException as e:
-        st.error(f"API request {path} failed: {e}")
+        if not _quiet:
+            st.error(f"API request {path} failed: {e}")
         return None
+
+
+def clear_api_cache():
+    _cached_get.clear()
 
 
 def finished(df: pd.DataFrame) -> pd.DataFrame:

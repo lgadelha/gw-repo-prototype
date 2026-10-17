@@ -136,7 +136,9 @@ with `POST /workflows/{id}/annotations/`, and filter runs with
 **Per task** (`/trace/{id}/progress`, `/heartbeat`): process name, module, container,
 exit status, requested vs. actual CPU / memory / time / disk, `%cpu`, `%mem`,
 `peak_rss`, `peak_vmem`, `rchar` / `wchar`, `read_bytes` / `write_bytes`, realtime,
-queue, tag, task name and attempt number.
+queue, tag, task name and attempt number, submit and complete times (queue wait = start −
+submit), executor, the executor's job id and the CPU model. A run's final state is set
+only at `/complete`; until then it is shown as RUNNING.
 
 **Retries.** Every attempt of a task is its own row (Nextflow gives each retry a new task
 id and work dir). Attempts of one task share the workflow and `task_name`
@@ -214,7 +216,8 @@ Open http://localhost:8501
 
 The sidebar holds the API key, run filters (institute, pipeline, start date) and the
 run selector. The selected run is kept in the URL (`?run=<workflow id>`), so links can
-be shared. Data is cached for 30 s; **Refresh data** fetches it now.
+be shared. Data is cached for 30 s; **Refresh data** fetches it now. While a run in the
+filter is still running, the page reloads every 15 s (**Auto-refresh**, on by default).
 
 #### Runs
 
@@ -228,8 +231,8 @@ Select one row and **Open run detail**, or several and **Compare runs**.
 
 The profile of the selected run:
 - **KPIs:** wall time (with the time before the first task), tasks, CPU-hours used
-  against allocated, peak task memory, data read and written, energy, CO2e and critical
-  path.
+  against allocated, peak task memory, median queue wait, data read and written, energy,
+  CO2e and critical path, plus the executors and CPU models that ran the tasks.
 - **Timeline:** one bar per task attempt, from start to start + realtime, coloured by
   process or status.
 - **Concurrency:** running tasks, CPUs allocated and used, and memory allocated and
@@ -270,6 +273,15 @@ For the selected run, the MultiQC General Statistics per sample (choose the metr
 to the resources used by each sample's tasks (tasks, CPU-hours, realtime, peak RSS, CO2e).
 It also plots a resource against a sample metric, for this run or for every run in the
 filter. Samples are linked to tasks through the task tag (nf-core's `meta.id`).
+
+#### Energy & CO2
+
+From nf-co2footprint (via `co2-import`), for the selected run:
+- energy, CO2e, car and tree equivalents, carbon intensity, and the CPU model and power
+  draw assumed;
+- energy per process, split into CPU and memory;
+- CO2e per sample;
+- CO2e per run over time for the runs in the filter.
 
 #### Process profile
 
