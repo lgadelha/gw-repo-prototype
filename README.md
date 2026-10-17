@@ -118,7 +118,13 @@ This is Nextflow's own built-in Tower/Seqera Platform client — the API impleme
 the receiving side of that protocol. Streamed live, as the run proceeds:
 
 **Workflow** (`/trace/create`, `/begin`, `/complete`): run name, Nextflow version,
-revision, start time, duration, final state. At `/begin`, the pipeline's `params` are
+revision, start time, duration, final state, and what identifies the pipeline version:
+`repository`, `commit_id` (both only for pipelines run from a repository, e.g.
+`nextflow run nf-core/rnaseq -r 3.26.0`), `script_id` (Nextflow's hash of the main
+script), `profile`, and `config_sha256`. `config_sha256` is a SHA-256 of the resolved
+config, not the text itself, which can hold paths and secrets. It leaves out what changes
+on every run (`runName`, `resume`) and the `tower {}` block, so runs with the same
+configuration hash the same. At `/begin`, the pipeline's `params` are
 stored as workflow annotations (`params.<name>`; nested maps such as nf-core's `genomes`
 flattened with dots, null params skipped).
 

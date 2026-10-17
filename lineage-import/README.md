@@ -80,6 +80,10 @@ Python 3 standard library only (`urllib`, `json`, `argparse`, `hashlib`). No
   input (`process_execution_id`, `filename` — the full work-dir path, `sha256`).
 - `POST /output_files/` — one `ProcessExecutionOutputFile` row per file-typed task
   output, same shape.
+- `PATCH /processes/{id}` — the task's `code_checksum`: nf-lineage's checksum of the
+  process code. It's the same for every task of a process and changes when the
+  process's code changes, so it tells pipeline versions apart per process. It's kept
+  when a `-resume` reports the task again.
 - `POST /parameters/` — one `ProcessExecutionParameterInput` row per task value
   parameter, read back with `GET /parameters/{process_execution_id}`:
   - `val` inputs, with map entries under dotted names (nf-core's `meta` map becomes

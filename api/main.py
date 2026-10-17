@@ -5,7 +5,7 @@ from sqlmodel import SQLModel, Field, create_engine, Session, Relationship, sele
 from sqlalchemy import text, BigInteger
 from typing import Optional, List, Annotated, Dict
 from datetime import datetime, timezone
-import os, time
+import os, time, hashlib
 
 from models import (
     Institut,
@@ -105,6 +105,11 @@ class WorkflowExecution(SQLModel, table=True):
     nextflow_version: Optional[str] = None
     final_state: Optional[str] = None
     revision_id: Optional[str] = None
+    script_id: Optional[str] = None  # Nextflow's hash of the main script
+    repository: Optional[str] = None
+    commit_id: Optional[str] = None
+    profile: Optional[str] = None
+    config_sha256: Optional[str] = None  # SHA-256 of the resolved config text; the text itself may hold paths and secrets
     institute_id: Optional[str] = Field(default="UNKNOWN", foreign_key="institut.id")
     data_size_tag: Optional[str] = None  # 'small', 'medium', 'large', 'mixed'
 
@@ -120,6 +125,7 @@ class ProcessExecution(SQLModel, table=True):
     tag: Optional[str] = None  # Nextflow task tag; nf-core sets it to the sample id (meta.id), matching Samplemetric.sample
     task_name: Optional[str] = None  # Nextflow task name, "<process> (<tag or index>)"; the same for every attempt of a task
     attempt: Optional[int] = None  # 1 for the first try, 2+ for retries (each retry is its own row, task_id and work dir)
+    code_checksum: Optional[str] = None  # nf-lineage codeChecksum of the process code, the same for all its tasks; set post-run by lineage-import
     module_name: Optional[str] = None
     container_name: Optional[str] = None
     final_status: str
@@ -289,6 +295,24 @@ def _ensure_institute(institute_id: str, session: Session):
         session.commit()
 
 
+def _config_sha256(config_text: Optional[str]) -> Optional[str]:
+    """SHA-256 of the resolved config, so runs with the same configuration hash
+    alike. Skips what differs on every run or only concerns reporting: the
+    top-level `runName` and `resume` lines, and the `tower {}` block (its endpoint
+    holds the institute and data-size tag)."""
+    if not config_text:
+        return None
+    kept, in_tower = [], False
+    for line in config_text.splitlines():
+        if line.startswith("tower {"):
+            in_tower = True
+        elif in_tower:
+            in_tower = line != "}"
+        elif not line.startswith(("runName = ", "resume = ")):
+            kept.append(line)
+    return hashlib.sha256("\n".join(kept).encode("utf-8")).hexdigest()
+
+
 def _workflow_row_from_payload(wf: dict, workflow_id: str, institute: str, data_size_tag: str) -> WorkflowExecution:
     """`workflow_id` (from the URL path, always present -- it's whatever
     /trace/create echoed back) is the fallback if `wf.sessionId` is somehow
@@ -306,6 +330,11 @@ def _workflow_row_from_payload(wf: dict, workflow_id: str, institute: str, data_
         nextflow_version=(wf.get("nextflow") or {}).get("version"),
         final_state=final_state,
         revision_id=wf.get("revision") or wf.get("commitId"),
+        script_id=wf.get("scriptId"),
+        repository=wf.get("repository"),
+        commit_id=wf.get("commitId"),
+        profile=wf.get("profile"),
+        config_sha256=_config_sha256(wf.get("configText")),
     )
 
 
@@ -335,8 +364,11 @@ def _upsert_tasks(tasks: List[dict], workflow_id: str, institute: str, data_size
         full_hash = _full_hash(task.get("workdir"))
         if not full_hash:
             continue
+        process_id = f"{workflow_id}_{full_hash}"
+        existing = session.get(ProcessExecution, process_id)
         session.merge(ProcessExecution(
-            id=f"{workflow_id}_{full_hash}",
+            id=process_id,
+            code_checksum=existing.code_checksum if existing else None,  # set post-run; keep it across -resume
             workflow_execution_id=workflow_id,
             institute_id=institute,
             task_id=task.get("taskId"),
@@ -491,6 +523,22 @@ def get_process(process_id: str, session: Session = Depends(get_session), api_ke
     process = session.get(ProcessExecution, process_id)
     if not process:
         raise HTTPException(status_code=404, detail="Process not found")
+    return process
+
+@app.patch("/processes/{process_id}", response_model=ProcessExecution)
+def update_process(process_id: str, update: dict = Body(...), session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
+    """Set fields only known after the run (currently `code_checksum`, from lineage-import)."""
+    allowed = {"code_checksum"}
+    if not update or set(update) - allowed:
+        raise HTTPException(status_code=400, detail=f"only {sorted(allowed)} can be updated")
+    process = session.get(ProcessExecution, process_id)
+    if not process:
+        raise HTTPException(status_code=404, detail="Process not found")
+    for key, value in update.items():
+        setattr(process, key, value)
+    session.add(process)
+    session.commit()
+    session.refresh(process)
     return process
 
 @app.get("/processes/{process_id}/attempts", response_model=List[ProcessExecution])

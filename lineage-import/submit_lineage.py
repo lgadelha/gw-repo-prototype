@@ -68,12 +68,12 @@ def get_json(endpoint, path, api_key):
         return json.loads(resp.read().decode("utf-8"))
 
 
-def post(endpoint, path, api_key, payload):
+def post(endpoint, path, api_key, payload, method="POST"):
     body = json.dumps({k: v for k, v in payload.items() if v is not None}).encode("utf-8")
     req = urllib.request.Request(
         endpoint.rstrip("/") + path,
         data=body,
-        method="POST",
+        method=method,
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
     )
     try:
@@ -171,6 +171,15 @@ def task_parameters(lineage_dir, task_hash):
     for name, value in (spec.get("globalVars") or {}).items():
         rows.extend(_flatten(name, value))
     return rows
+
+
+def task_code_checksum(lineage_dir, task_hash):
+    """nf-lineage's codeChecksum of the task's process code (the same for every task
+    of a process; changes when the process code changes)."""
+    task_run = _lineage_record(lineage_dir, task_hash)
+    if not task_run or task_run.get("kind") != "TaskRun":
+        return None
+    return (task_run["spec"].get("codeChecksum") or {}).get("value")
 
 
 def task_work_dir(lineage_dir, task_hash):
@@ -306,6 +315,16 @@ def main():
                 else:
                     print(f"  ! POST {api_path} for {process_id} ({path}) -> {code} {msg}")
                     failed += 1
+
+        checksum = task_code_checksum(lineage_dir, task_hash)
+        if checksum and args.dry_run:
+            print(f"  {process_id} code_checksum {checksum}")
+        elif checksum:
+            code, msg = post(args.endpoint, f"/processes/{process_id}", api_key,
+                             {"code_checksum": checksum}, method="PATCH")
+            if not (code and code < 300):
+                print(f"  ! PATCH /processes/{process_id} code_checksum -> {code} {msg}")
+                failed += 1
 
         for name, text, num in task_parameters(lineage_dir, task_hash):
             if args.dry_run:
