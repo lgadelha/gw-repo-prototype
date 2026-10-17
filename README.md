@@ -212,34 +212,66 @@ Open http://localhost:8501
 
 ### Dashboard Pages
 
-#### 1. Dashboard
+The sidebar holds the API key, run filters (institute, pipeline, start date) and the
+run selector. The selected run is kept in the URL (`?run=<workflow id>`), so links can
+be shared. Data is cached for 30 s; **Refresh data** fetches it now.
 
-Combined view for process-level analytics and execution metrics
+#### Runs
+
+One row per run: pipeline, revision and commit, profile, institute, size tag, campaign,
+state (RUNNING until the run completes), start, duration, tasks, retried tasks, failed
+attempts, CPU-hours used and allocated, energy and CO2e. It also has charts of run
+duration over time, CPU-hours per run, and the share of tasks retried or not succeeded.
+Selecting a row opens Run detail.
+
+#### Run detail
+
+The profile of the selected run:
+- **KPIs:** wall time, tasks, CPU-hours used against allocated, peak task memory, data
+  read and written, energy and CO2e.
+- **Timeline:** one bar per task attempt, from start to start + realtime, coloured by
+  process or status.
+- **Concurrency:** running tasks, CPUs allocated and used, and memory allocated and
+  peak, over time.
+- **Processes:** per-process medians and maxima, with CPU, memory and time efficiency
+  (used / requested), input and output size, CPU-hours and CO2e. Finished attempts only.
+- **Right-sizing:** requested against used memory, CPU or time per task, flagging tasks
+  under 25 % or over 90 % of their request.
+- **Retries:** tasks retried or never succeeded, each attempt with its exit code and
+  memory request.
+- **Parameters & versions:** repository, revision, commit, profile, Nextflow version,
+  script and config hashes, annotations, and pipeline params. The nf-core `genomes`
+  catalog is hidden unless switched on.
+
+#### Process analytics: Dashboard
+
+Combined view for process-level analytics and execution metrics, across all runs.
 
 **Dashboard Tab:**
 - Process resource utilization charts (CPU%, memory%, duration)
 - Filter by process name
 - Historical execution table with all metrics
-- Summary statistics by process
+- Summary statistics by process (finished attempts only)
 - CPU utilization distribution (box plots)
-- Disk I/O & storage metrics
+- Input size & I/O metrics
 
 ---
 
-#### 2. Analytics
+#### Process analytics: Analytics
 
 Helps to understand resource patterns per process and identification of bottlenecks
 
 - Select process from dropdown
-- Correlation plots:
-  - Memory vs Disk Size (with R² correlation)
-  - CPU Cores Used vs Disk Size
-  - Duration vs Disk Size
-  - Data Read/Written vs Disk Size
+- Correlation plots against the task's input size (the sum of its input files' sizes,
+  from `lineage-import`):
+  - Memory vs Input Size (with R² correlation)
+  - CPU Cores Used vs Input Size
+  - Duration vs Input Size
+  - Data Read/Written vs Input Size
   - Memory vs I/O intensity
 - Process classification:
-  - **Memory-Heavy**: Memory/Disk ratio > 10×
-  - **Disk-Heavy**: Memory/Disk ratio < 0.5×
+  - **Memory-Heavy**: Memory/Input ratio > 10×
+  - **Input-Heavy**: Memory/Input ratio < 0.5×
   - **I/O-Intensive**: I/O intensity > 5×
   - **Compute-Intensive**: I/O intensity < 0.5×
 - Toggle log scale for better visualization

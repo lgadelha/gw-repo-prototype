@@ -282,6 +282,69 @@ def get_workflows(request: Request, session: Session = Depends(get_session), api
         ))
     return session.exec(query).all()
 
+# CPU-hours used: realtime x %CPU; allocated: realtime x CPUs requested. Both
+# over every attempt (failed attempts consumed resources too).
+@app.get("/workflows/summary")
+def get_workflows_summary(session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
+    """One row per run: the workflow columns plus task counts by status, logical
+    tasks retried or not succeeded, CPU-hours used and allocated, peak task
+    memory, energy and CO2e totals, and the campaign annotation."""
+    query = """
+    SELECT w.*, t.tasks, t.finished, t.failed, t.cached, t.cpu_hours_used, t.cpu_hours_allocated,
+           t.peak_rss_mb, l.logical_tasks, l.retried, l.not_succeeded,
+           c.energy_mwh, c.co2e_mg, a.value_text AS campaign
+    FROM workflowexecution w
+    LEFT JOIN (
+        SELECT workflow_execution_id,
+               count(*) AS tasks,
+               count(*) FILTER (WHERE final_status IN ('COMPLETED', 'CACHED')) AS finished,
+               count(*) FILTER (WHERE final_status = 'FAILED') AS failed,
+               count(*) FILTER (WHERE final_status = 'CACHED') AS cached,
+               sum(realtime * percent_cpu / 100.0) / 3600 AS cpu_hours_used,
+               sum(realtime * cpus_requested) / 3600 AS cpu_hours_allocated,
+               max(peak_rss) AS peak_rss_mb
+        FROM processexecution GROUP BY workflow_execution_id
+    ) t ON t.workflow_execution_id = w.id
+    LEFT JOIN (
+        SELECT workflow_execution_id,
+               count(*) AS logical_tasks,
+               count(*) FILTER (WHERE attempts > 1) AS retried,
+               count(*) FILTER (WHERE NOT succeeded) AS not_succeeded
+        FROM logical_task GROUP BY workflow_execution_id
+    ) l ON l.workflow_execution_id = w.id
+    LEFT JOIN (
+        SELECT p.workflow_execution_id, sum(c.energy_consumption_mwh) AS energy_mwh, sum(c.co2e_mg) AS co2e_mg
+        FROM co2footprint c JOIN processexecution p ON p.id = c.process_execution_id
+        GROUP BY p.workflow_execution_id
+    ) c ON c.workflow_execution_id = w.id
+    LEFT JOIN workflowannotation a ON a.workflow_execution_id = w.id AND a.key = 'campaign'
+    ORDER BY w.start_time DESC NULLS LAST
+    """
+    return [dict(r._mapping) for r in session.execute(text(query))]
+
+@app.get("/workflows/{workflow_id}/task_profile")
+def get_task_profile(workflow_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
+    """Every task (attempt) of a run: the processexecution columns plus total
+    input/output bytes, energy, CO2e and CPU-hours used."""
+    query = """
+    SELECT p.*,
+           (SELECT sum(i.size_bytes) FROM processexecutioninputfile i WHERE i.process_execution_id = p.id) AS input_bytes,
+           (SELECT sum(o.size_bytes) FROM processexecutionoutputfile o WHERE o.process_execution_id = p.id) AS output_bytes,
+           c.energy_consumption_mwh AS energy_mwh, c.co2e_mg,
+           p.realtime * p.percent_cpu / 100.0 / 3600 AS cpu_hours
+    FROM processexecution p
+    LEFT JOIN co2footprint c ON c.process_execution_id = p.id
+    WHERE p.workflow_execution_id = :workflow_id
+    ORDER BY p.start_time
+    """
+    return [dict(r._mapping) for r in session.execute(text(query), {"workflow_id": workflow_id})]
+
+@app.get("/workflows/{workflow_id}/logical_tasks")
+def get_logical_tasks(workflow_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
+    """The run's rows of the logical_task view (one per task, over its attempts)."""
+    query = "SELECT * FROM logical_task WHERE workflow_execution_id = :workflow_id ORDER BY task_name"
+    return [dict(r._mapping) for r in session.execute(text(query), {"workflow_id": workflow_id})]
+
 @app.get("/workflows/{execution_id}", response_model=WorkflowExecution)
 def get_workflow(execution_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
     workflow = session.get(WorkflowExecution, execution_id)
@@ -573,6 +636,26 @@ def get_processes(
     if workflow_execution_id:
         query = query.where(ProcessExecution.workflow_execution_id == workflow_execution_id)
     return session.exec(query).all()
+
+@app.get("/processes/io_bytes")
+def get_processes_io_bytes(
+    workflow_execution_id: Optional[str] = None,
+    session: Session = Depends(get_session),
+    api_key: str = Depends(verify_api_key),
+):
+    """Total input and output bytes per task (sums of the file rows' size_bytes,
+    from lineage-import); null for tasks with no file rows."""
+    query = """
+    SELECT p.id AS process_execution_id,
+           (SELECT sum(i.size_bytes) FROM processexecutioninputfile i WHERE i.process_execution_id = p.id) AS input_bytes,
+           (SELECT sum(o.size_bytes) FROM processexecutionoutputfile o WHERE o.process_execution_id = p.id) AS output_bytes
+    FROM processexecution p
+    """
+    params = {}
+    if workflow_execution_id:
+        query += " WHERE p.workflow_execution_id = :workflow_execution_id"
+        params["workflow_execution_id"] = workflow_execution_id
+    return [dict(r._mapping) for r in session.execute(text(query), params)]
 
 @app.get("/processes/{process_id}", response_model=ProcessExecution)
 def get_process(process_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
