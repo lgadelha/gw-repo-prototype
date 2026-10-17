@@ -85,6 +85,12 @@ def test_attempt_chains():
     assert c.iloc[0]['history'] == '#1: exit 137 @ 1024 MB → #2: exit 0 @ 2048 MB'
 
 
+def test_task_span():
+    startup, span = prof.task_span(tasks(), T0 - 60)
+    assert startup == 60      # workflow began 60 s before the first task
+    assert span == 35         # first start T0 to last end T0 + 30 + 5
+
+
 if __name__ == '__main__':
     for name, fn in list(globals().items()):
         if name.startswith('test_'):

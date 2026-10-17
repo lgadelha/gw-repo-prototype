@@ -49,6 +49,18 @@ def add_task_metrics(tasks: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def task_span(tasks: pd.DataFrame, workflow_start) -> tuple:
+    """(seconds from the workflow's start to its first task's start, seconds from
+    the first task's start to the last task's end). The first part is start-up:
+    fetching the pipeline, staging remote inputs, pulling containers before any task."""
+    started = tasks[tasks['start'].notna()]
+    if started.empty or pd.isna(workflow_start):
+        return None, None
+    first = started['start'].min()
+    return ((first - pd.to_datetime(workflow_start, unit='s')).total_seconds(),
+            (started['end'].max() - first).total_seconds())
+
+
 def concurrency(tasks: pd.DataFrame) -> pd.DataFrame:
     """Step series over time of running tasks, CPUs allocated and used, and memory
     allocated and peak (GB), from each task's [start, end) interval. Memory used is

@@ -7,6 +7,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+import provgraph as pg
 import runprofile as prof
 from common import api_get, fmt_duration, fmt_mb
 
@@ -25,8 +26,10 @@ def render(run: pd.Series):
         return
     tasks = prof.add_task_metrics(pd.DataFrame(rows))
     logical = pd.DataFrame(api_get(f"/workflows/{run['id']}/logical_tasks") or [])
+    internal = pg.internal_edges(pd.DataFrame(api_get(f"/workflows/{run['id']}/graph") or []), run['id'])
+    critical = pg.critical_path(tasks, internal)[1] if not internal.empty else None
 
-    _kpis(run, tasks)
+    _kpis(run, tasks, critical)
     timeline, processes, sizing, retries, params = st.tabs(
         ["Timeline", "Processes", "Right-sizing", "Retries", "Parameters & versions"])
     with timeline:
@@ -42,10 +45,12 @@ def render(run: pd.Series):
         _params_and_versions(run)
 
 
-def _kpis(run, tasks):
+def _kpis(run, tasks, critical):
     c = st.columns(4)
     c[0].metric("Wall time", fmt_duration(run['duration']), help="From the workflow's begin to complete")
-    c[0].caption(f"State: **{run['state']}**")
+    startup, span = prof.task_span(tasks, run['start_time'])
+    c[0].caption(f"State: **{run['state']}**" + (f" · first task after {fmt_duration(startup)}, tasks then ran "
+                                                  f"for {fmt_duration(span)}" if startup is not None else ''))
     logical_n = int(run['logical_tasks']) if pd.notna(run['logical_tasks']) else len(tasks)
     c[1].metric("Tasks", logical_n, help="Logical tasks; retries of a task count once")
     c[1].caption(f"{int(run['finished'])} finished · {int(run['failed'])} failed attempts · "
@@ -56,7 +61,11 @@ def _kpis(run, tasks):
     if pd.notna(used) and allocated:
         c[2].caption(f"{100 * used / allocated:.0f}% of {allocated:.3f} allocated (realtime × CPUs requested)")
     c[3].metric("Peak task memory", fmt_mb(tasks['peak_rss'].max()))
-    c = st.columns(4)
+    c = st.columns(5)
+    c[4].metric("Critical path", fmt_duration(critical),
+                help="Longest chain of dependent tasks, by Nextflow duration (see Provenance)")
+    if critical and span:
+        c[4].caption(f"{100 * critical / span:.0f}% of the task span")
     c[0].metric("Data read", fmt_mb(tasks['read_bytes'].sum() / 2**20), help="Σ read_bytes (storage reads)")
     c[1].metric("Data written", fmt_mb(tasks['write_bytes'].sum() / 2**20), help="Σ write_bytes (storage writes)")
     c[2].metric("Energy", f"{run['energy_wh']:.2f} Wh" if pd.notna(run['energy_wh']) else '–',

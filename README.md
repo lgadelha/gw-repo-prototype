@@ -227,8 +227,9 @@ Selecting a row opens Run detail.
 #### Run detail
 
 The profile of the selected run:
-- **KPIs:** wall time, tasks, CPU-hours used against allocated, peak task memory, data
-  read and written, energy and CO2e.
+- **KPIs:** wall time (with the time before the first task), tasks, CPU-hours used
+  against allocated, peak task memory, data read and written, energy, CO2e and critical
+  path.
 - **Timeline:** one bar per task attempt, from start to start + realtime, coloured by
   process or status.
 - **Concurrency:** running tasks, CPUs allocated and used, and memory allocated and
@@ -242,6 +243,23 @@ The profile of the selected run:
 - **Parameters & versions:** repository, revision, commit, profile, Nextflow version,
   script and config hashes, annotations, and pipeline params. The nf-core `genomes`
   catalog is hidden unless switched on.
+
+#### Provenance
+
+The lineage of the selected run (from `lineage-import`). A task picked in the sidebar is
+kept in the URL as `?task=<id>`.
+- **Process graph:** one node per process, coloured by CPU-hours, total realtime, max peak
+  RSS or failed attempts. Edges are labelled with the number of files and bytes read; the
+  critical path is outlined in red.
+- **Task lineage:** the ancestors and/or descendants of the selected task, across runs too.
+  Edges matched by content between runs are dashed.
+- **Task inspector:** status, container, code checksum, resources requested vs used,
+  attempts, parameters (`meta.*`, `task.ext.args`), input files with the task that
+  produced each, and output files with how many tasks used them, here and in other runs.
+- **File inspector:** search the run's files by name or SHA-256 prefix, then list every
+  task, in any run, that produced or used the same content.
+- **Critical path:** the longest chain of dependent tasks by Nextflow duration, its share of
+  the task span (first task start to last task end), and the time before the first task.
 
 #### Process analytics: Dashboard
 

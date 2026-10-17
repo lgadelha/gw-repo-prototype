@@ -345,6 +345,44 @@ def get_logical_tasks(workflow_id: str, session: Session = Depends(get_session),
     query = "SELECT * FROM logical_task WHERE workflow_execution_id = :workflow_id ORDER BY task_name"
     return [dict(r._mapping) for r in session.execute(text(query), {"workflow_id": workflow_id})]
 
+@app.get("/workflows/{workflow_id}/graph")
+def get_workflow_graph(workflow_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
+    """prov_graph edges touching a run: its own (matched by path) and those linking
+    it to other runs (matched by content), with each side's workflow and the size
+    of the file as the consumer read it."""
+    query = """
+    SELECT g.producer_id, g.consumer_id, g.filename, g.sha256, g.matched_by, i.size_bytes,
+           pp.workflow_execution_id AS producer_workflow_id, cp.workflow_execution_id AS consumer_workflow_id
+    FROM prov_graph g
+    JOIN processexecution pp ON pp.id = g.producer_id
+    JOIN processexecution cp ON cp.id = g.consumer_id
+    LEFT JOIN processexecutioninputfile i ON i.process_execution_id = g.consumer_id AND i.filename = g.filename
+    WHERE pp.workflow_execution_id = :workflow_id OR cp.workflow_execution_id = :workflow_id
+    """
+    return [dict(r._mapping) for r in session.execute(text(query), {"workflow_id": workflow_id})]
+
+@app.get("/workflows/{workflow_id}/files")
+def get_workflow_files(workflow_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
+    """Every input and output file row of a run's tasks, with `direction`."""
+    query = """
+    SELECT 'input' AS direction, f.* FROM processexecutioninputfile f
+    JOIN processexecution p ON p.id = f.process_execution_id WHERE p.workflow_execution_id = :workflow_id
+    UNION ALL
+    SELECT 'output' AS direction, f.* FROM processexecutionoutputfile f
+    JOIN processexecution p ON p.id = f.process_execution_id WHERE p.workflow_execution_id = :workflow_id
+    """
+    return [dict(r._mapping) for r in session.execute(text(query), {"workflow_id": workflow_id})]
+
+@app.get("/workflows/{workflow_id}/parameters")
+def get_workflow_parameters(workflow_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
+    """Every task parameter row (value inputs, task globals) of a run."""
+    query = """
+    SELECT r.* FROM processexecutionparameterinput r
+    JOIN processexecution p ON p.id = r.process_execution_id
+    WHERE p.workflow_execution_id = :workflow_id
+    """
+    return [dict(r._mapping) for r in session.execute(text(query), {"workflow_id": workflow_id})]
+
 @app.get("/workflows/{execution_id}", response_model=WorkflowExecution)
 def get_workflow(execution_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
     workflow = session.get(WorkflowExecution, execution_id)
