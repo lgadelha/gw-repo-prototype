@@ -834,6 +834,37 @@ def get_file_consumers(sha256: str, session: Session = Depends(get_session), api
     return session.exec(select(ProcessExecutionInputFile).where(ProcessExecutionInputFile.sha256 == sha256)).all()
 
 
+@app.get("/process_names")
+def get_process_names(session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
+    """Distinct process short names (last `:` component), with task and run counts."""
+    query = """
+    SELECT split_part(process_name, ':', -1) AS process, count(*) AS tasks,
+           count(DISTINCT workflow_execution_id) AS runs
+    FROM processexecution GROUP BY 1 ORDER BY 1
+    """
+    return [dict(r._mapping) for r in session.execute(text(query))]
+
+
+@app.get("/process_profile")
+def get_process_profile(process: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
+    """Every attempt, in any run, of the processes whose short name is `process`
+    (e.g. STAR_ALIGN), with input bytes, CPU-hours, code checksum and the run's
+    name, revision, commit, institute and size tag."""
+    query = """
+    SELECT p.id, p.workflow_execution_id, p.process_name, p.task_name, p.tag, p.attempt, p.final_status,
+           p.exit_code, p.start_time, p.realtime, p.duration, p.peak_rss, p.percent_cpu, p.cpus_requested,
+           p.memory_requested, p.time_requested, p.realtime * p.percent_cpu / 100.0 / 3600 AS cpu_hours,
+           p.code_checksum, p.institute_id, p.data_size_tag,
+           (SELECT sum(i.size_bytes) FROM processexecutioninputfile i WHERE i.process_execution_id = p.id) AS input_bytes,
+           w.run_name, w.revision_id, w.commit_id, w.repository
+    FROM processexecution p
+    JOIN workflowexecution w ON w.id = p.workflow_execution_id
+    WHERE split_part(p.process_name, ':', -1) = :process
+    ORDER BY p.start_time
+    """
+    return [dict(r._mapping) for r in session.execute(text(query), {"process": process})]
+
+
 @app.get("/compare_runs")
 def compare_runs(
     key: str,

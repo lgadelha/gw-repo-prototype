@@ -222,7 +222,7 @@ One row per run: pipeline, revision and commit, profile, institute, size tag, ca
 state (RUNNING until the run completes), start, duration, tasks, retried tasks, failed
 attempts, CPU-hours used and allocated, energy and CO2e. It also has charts of run
 duration over time, CPU-hours per run, and the share of tasks retried or not succeeded.
-Selecting a row opens Run detail.
+Select one row and **Open run detail**, or several and **Compare runs**.
 
 #### Run detail
 
@@ -236,6 +236,9 @@ The profile of the selected run:
   peak, over time.
 - **Processes:** per-process medians and maxima, with CPU, memory and time efficiency
   (used / requested), input and output size, CPU-hours and CO2e. Finished attempts only.
+- **Cost:** a treemap of CPU-hours, energy or realtime by subworkflow and process, and a
+  Pareto chart of the top processes.
+- **I/O:** storage read and written per process, and output vs input size per task.
 - **Right-sizing:** requested against used memory, CPU or time per task, flagging tasks
   under 25 % or over 90 % of their request.
 - **Retries:** tasks retried or never succeeded, each attempt with its exit code and
@@ -260,6 +263,37 @@ kept in the URL as `?task=<id>`.
   task, in any run, that produced or used the same content.
 - **Critical path:** the longest chain of dependent tasks by Nextflow duration, its share of
   the task span (first task start to last task end), and the time before the first task.
+
+#### Samples
+
+For the selected run, the MultiQC General Statistics per sample (choose the metrics) next
+to the resources used by each sample's tasks (tasks, CPU-hours, realtime, peak RSS, CO2e).
+It also plots a resource against a sample metric, for this run or for every run in the
+filter. Samples are linked to tasks through the task tag (nf-core's `meta.id`).
+
+#### Process profile
+
+One process (by short name, e.g. `STAR_ALIGN`) across all runs; kept in the URL as
+`?process=`.
+- **Scaling:** peak RSS, realtime, CPU-hours or %CPU against the task's input size or a
+  sample metric, coloured by run, code checksum, revision, institute or size tag, with
+  a linear fit and R².
+- **Versions:** the same per code checksum and revision.
+- **Requested vs used** memory across runs.
+- **Failures:** attempts, kills (137/140) and retries per run.
+
+#### Compare runs
+
+Two or more runs against a baseline:
+- **Parameters:** params and annotations that differ.
+- **Versions:** revision, commit, profile, Nextflow version, script and config hashes, and
+  which processes' code changed (code checksum).
+- **Resources:** per-process change in median realtime, median peak RSS or CPU-hours,
+  as a ratio to the baseline.
+- **Samples:** a sample metric side by side for shared samples.
+- **Annotation vs resources:** for one annotation (e.g. `campaign`, `params.aligner`) and
+  a process, resource use per value across every run (MTCProv's
+  `correlate_parameter_runtime`).
 
 #### Process analytics: Dashboard
 

@@ -30,13 +30,17 @@ def render(run: pd.Series):
     critical = pg.critical_path(tasks, internal)[1] if not internal.empty else None
 
     _kpis(run, tasks, critical)
-    timeline, processes, sizing, retries, params = st.tabs(
-        ["Timeline", "Processes", "Right-sizing", "Retries", "Parameters & versions"])
+    timeline, processes, cost, io, sizing, retries, params = st.tabs(
+        ["Timeline", "Processes", "Cost", "I/O", "Right-sizing", "Retries", "Parameters & versions"])
     with timeline:
         _timeline(tasks)
         _concurrency(tasks)
     with processes:
         _process_table(tasks)
+    with cost:
+        _cost(tasks)
+    with io:
+        _io(tasks)
     with sizing:
         _rightsizing(tasks)
     with retries:
@@ -157,6 +161,60 @@ def _process_table(tasks):
             'co2e_g': st.column_config.NumberColumn('CO2e (g)', format="%.3f"),
         },
     )
+
+
+COST_METRICS = {'cpu_hours': 'CPU-hours', 'energy_mwh': 'Energy (mWh)', 'realtime': 'Realtime (s)'}
+TOP_PROCESSES = 20
+
+
+def _cost(tasks):
+    """Where the run's resources went: treemap by subworkflow and process, and a
+    Pareto chart. Every attempt counts, since failed ones consumed resources too."""
+    metric = st.radio("Measure", list(COST_METRICS), horizontal=True, format_func=COST_METRICS.get)
+    df = tasks[tasks[metric].fillna(0) > 0].assign(subworkflow=lambda d: d['subworkflow'].replace('', '(top level)'))
+    if df.empty:
+        st.info(f"No {COST_METRICS[metric].lower()} recorded for this run.")
+        return
+    fig = px.treemap(df, path=[px.Constant('run'), 'subworkflow', 'process'], values=metric,
+                     title=f"{COST_METRICS[metric]} by subworkflow and process")
+    fig.update_traces(root_color='lightgrey')
+    st.plotly_chart(fig, width="stretch")
+    totals = df.groupby('process_name').agg(process=('process', 'first'), value=(metric, 'sum')) \
+        .sort_values('value', ascending=False).head(TOP_PROCESSES)
+    totals['cumulative'] = 100 * totals['value'].cumsum() / df[metric].sum()
+    fig = go.Figure([go.Bar(x=totals['process'], y=totals['value'], name=COST_METRICS[metric]),
+                     go.Scatter(x=totals['process'], y=totals['cumulative'], name='Cumulative %', yaxis='y2',
+                                mode='lines+markers')])
+    fig.update_layout(title=f"Top {len(totals)} processes (Pareto)", yaxis_title=COST_METRICS[metric],
+                      yaxis2=dict(title='Cumulative % of run', overlaying='y', side='right', range=[0, 105]))
+    st.plotly_chart(fig, width="stretch")
+    top = totals['cumulative'].searchsorted(80) + 1
+    st.caption(f"The top {min(top, len(totals))} processes account for 80% of the run's "
+               f"{COST_METRICS[metric].split(' (')[0]}.")
+
+
+def _io(tasks):
+    """BioWorkbench's read vs written per activity, plus input vs output size per task."""
+    per = tasks.groupby('process_name').agg(process=('process', 'first'), read=('read_bytes', 'sum'),
+                                            written=('write_bytes', 'sum'))
+    per = per.assign(total=per['read'] + per['written']).sort_values('total', ascending=False).head(TOP_PROCESSES)
+    long = per.melt(id_vars='process', value_vars=['read', 'written'], var_name='I/O', value_name='bytes')
+    long['MB'] = long['bytes'] / 2**20
+    fig = px.bar(long, x='process', y='MB', color='I/O', barmode='group',
+                 title=f"Storage read and written, top {len(per)} processes",
+                 labels={'process': 'Process', 'MB': 'MB'})
+    st.plotly_chart(fig, width="stretch")
+    sized = tasks[(tasks['input_mb'] > 0) & (tasks['output_mb'] > 0)]
+    if sized.empty:
+        st.info("No input/output sizes: run lineage-import.")
+        return
+    fig = px.scatter(sized, x='input_mb', y='output_mb', color='process', log_x=True, log_y=True,
+                     hover_name='task_name', title="Output size vs input size per task",
+                     labels={'input_mb': 'Input (MB)', 'output_mb': 'Output (MB)', 'process': 'Process'})
+    fig.update_layout(showlegend=sized['process'].nunique() <= 40)
+    st.plotly_chart(fig, width="stretch")
+    st.caption("Read/written: storage I/O reported by Nextflow (read_bytes, write_bytes). Input/output size: the "
+               "task's files, from lineage-import.")
 
 
 def _rightsizing(tasks):

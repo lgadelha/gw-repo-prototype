@@ -1,5 +1,6 @@
 """Runs overview: one row per run (swift-provenancedb's script_run_summary), with
-the sidebar filters applied. Selecting a row opens Run detail."""
+the sidebar filters applied. Select one row to open Run detail, or several to
+compare them."""
 
 import pandas as pd
 import plotly.express as px
@@ -17,7 +18,7 @@ COLUMNS = {
 }
 
 
-def render(runs: pd.DataFrame, run_detail_page):
+def render(runs: pd.DataFrame, run_detail_page, compare_page):
     st.title("Runs")
     if runs.empty:
         st.info("No runs match the filters. Run a pipeline with gwrepo.config, or widen the filters.")
@@ -30,10 +31,10 @@ def render(runs: pd.DataFrame, run_detail_page):
     c[3].metric("CPU-hours used", f"{runs['cpu_hours_used'].sum():.2f}")
     c[4].metric("Energy", f"{runs['energy_wh'].sum():.1f} Wh")
 
-    st.caption("Select a row to open the run's detail page.")
+    st.caption("Select one row to open the run, or several to compare them.")
     table = runs.assign(duration_h=runs['duration'] / 3600)[list(COLUMNS)].rename(columns=COLUMNS)
     event = st.dataframe(
-        table, hide_index=True, width="stretch", on_select="rerun", selection_mode="single-row",
+        table, hide_index=True, width="stretch", on_select="rerun", selection_mode="multi-row",
         column_config={
             'Start': st.column_config.DatetimeColumn(format="YYYY-MM-DD HH:mm"),
             'Duration (h)': st.column_config.NumberColumn(format="%.2f"),
@@ -43,9 +44,15 @@ def render(runs: pd.DataFrame, run_detail_page):
             'CO2e (g)': st.column_config.NumberColumn(format="%.2f"),
         },
     )
-    if event.selection.rows:
-        st.session_state['run'] = runs.iloc[event.selection.rows[0]]['id']
+    selected = runs.iloc[event.selection.rows]['id'].tolist()
+    c = st.columns([1, 1, 4])
+    if c[0].button("Open run detail", disabled=len(selected) != 1):
+        st.session_state['run'] = selected[0]
         st.switch_page(run_detail_page)
+    if c[1].button(f"Compare {len(selected)} runs" if len(selected) > 1 else "Compare runs",
+                   disabled=len(selected) < 2):
+        st.session_state['compare'] = selected
+        st.switch_page(compare_page)
 
     timed = runs[runs['start'].notna()]
     if timed.empty:

@@ -23,8 +23,11 @@ if 'run' not in st.session_state:
 navigation = st.navigation({
     "Observability": [st.Page("nav/runs.py", title="Runs", icon="📋", url_path="runs", default=True),
                       st.Page("nav/run_detail.py", title="Run detail", icon="🔍", url_path="run"),
-                      st.Page("nav/provenance.py", title="Provenance", icon="🧬", url_path="provenance")],
-    "Across runs": [st.Page("nav/analytics.py", title="Process analytics", icon="📈", url_path="analytics")],
+                      st.Page("nav/provenance.py", title="Provenance", icon="🧬", url_path="provenance"),
+                      st.Page("nav/samples.py", title="Samples", icon="🧪", url_path="samples")],
+    "Across runs": [st.Page("nav/process_profile.py", title="Process profile", icon="⚙️", url_path="process"),
+                    st.Page("nav/compare.py", title="Compare runs", icon="⚖️", url_path="compare"),
+                    st.Page("nav/analytics.py", title="Process analytics", icon="📈", url_path="analytics")],
     "Resource optimization": [st.Page("nav/optimization.py", title="Bayesian modelling", icon="🤖",
                                       url_path="optimization")],
 })
