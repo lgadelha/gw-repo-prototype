@@ -136,7 +136,9 @@ with `POST /workflows/{id}/annotations/`, and filter runs with
 **Per task** (`/trace/{id}/progress`, `/heartbeat`): process name, module, container,
 exit status, requested vs. actual CPU / memory / time / disk, `%cpu`, `%mem`,
 `peak_rss`, `peak_vmem`, `rchar` / `wchar`, `read_bytes` / `write_bytes`, realtime,
-queue, tag, task name and attempt number.
+queue, tag, task name and attempt number, submit and complete times (queue wait = start −
+submit), executor, the executor's job id and the CPU model. A run's final state is set
+only at `/complete`; until then it is shown as RUNNING.
 
 **Retries.** Every attempt of a task is its own row (Nextflow gives each retry a new task
 id and work dir). Attempts of one task share the workflow and `task_name`
@@ -212,34 +214,128 @@ Open http://localhost:8501
 
 ### Dashboard Pages
 
-#### 1. Dashboard
+The sidebar holds the API key, run filters (institute, pipeline, start date) and the
+run selector. The selected run is kept in the URL (`?run=<workflow id>`), so links can
+be shared. Data is cached for 30 s; **Refresh data** fetches it now. While a run in the
+filter is still running, the page reloads every 15 s (**Auto-refresh**, on by default).
 
-Combined view for process-level analytics and execution metrics
+#### Runs
+
+One row per run: pipeline, revision and commit, profile, institute, size tag, campaign,
+state (RUNNING until the run completes), start, duration, tasks, retried tasks, failed
+attempts, CPU-hours used and allocated, energy and CO2e. It also has charts of run
+duration over time, CPU-hours per run, and the share of tasks retried or not succeeded.
+Select one row and **Open run detail**, or several and **Compare runs**.
+
+#### Run detail
+
+The profile of the selected run:
+- **KPIs:** wall time (with the time before the first task), tasks, CPU-hours used
+  against allocated, peak task memory, median queue wait, data read and written, energy,
+  CO2e and critical path, plus the executors and CPU models that ran the tasks.
+- **Timeline:** one bar per task attempt, from start to start + realtime, coloured by
+  process or status.
+- **Concurrency:** running tasks, CPUs allocated and used, and memory allocated and
+  peak, over time.
+- **Processes:** per-process medians and maxima, with CPU, memory and time efficiency
+  (used / requested), input and output size, CPU-hours and CO2e. Finished attempts only.
+- **Cost:** a treemap of CPU-hours, energy or realtime by subworkflow and process, and a
+  Pareto chart of the top processes.
+- **I/O:** storage read and written per process, and output vs input size per task.
+- **Right-sizing:** requested against used memory, CPU or time per task, flagging tasks
+  under 25 % or over 90 % of their request.
+- **Retries:** tasks retried or never succeeded, each attempt with its exit code and
+  memory request.
+- **Parameters & versions:** repository, revision, commit, profile, Nextflow version,
+  script and config hashes, annotations, and pipeline params. The nf-core `genomes`
+  catalog is hidden unless switched on.
+
+#### Provenance
+
+The lineage of the selected run (from `lineage-import`). A task picked in the sidebar is
+kept in the URL as `?task=<id>`.
+- **Process graph:** one node per process, coloured by CPU-hours, total realtime, max peak
+  RSS or failed attempts. Edges are labelled with the number of files and bytes read; the
+  critical path is outlined in red.
+- **Task lineage:** the ancestors and/or descendants of the selected task, across runs too.
+  Edges matched by content between runs are dashed.
+- **Task inspector:** status, container, code checksum, resources requested vs used,
+  attempts, parameters (`meta.*`, `task.ext.args`), input files with the task that
+  produced each, and output files with how many tasks used them, here and in other runs.
+- **File inspector:** search the run's files by name or SHA-256 prefix, then list every
+  task, in any run, that produced or used the same content.
+- **Critical path:** the longest chain of dependent tasks by Nextflow duration, its share of
+  the task span (first task start to last task end), and the time before the first task.
+
+#### Samples
+
+For the selected run, the MultiQC General Statistics per sample (choose the metrics) next
+to the resources used by each sample's tasks (tasks, CPU-hours, realtime, peak RSS, CO2e).
+It also plots a resource against a sample metric, for this run or for every run in the
+filter. Samples are linked to tasks through the task tag (nf-core's `meta.id`).
+
+#### Energy & CO2
+
+From nf-co2footprint (via `co2-import`), for the selected run:
+- energy, CO2e, car and tree equivalents, carbon intensity, and the CPU model and power
+  draw assumed;
+- energy per process, split into CPU and memory;
+- CO2e per sample;
+- CO2e per run over time for the runs in the filter.
+
+#### Process profile
+
+One process (by short name, e.g. `STAR_ALIGN`) across all runs; kept in the URL as
+`?process=`.
+- **Scaling:** peak RSS, realtime, CPU-hours or %CPU against the task's input size or a
+  sample metric, coloured by run, code checksum, revision, institute or size tag, with
+  a linear fit and R².
+- **Versions:** the same per code checksum and revision.
+- **Requested vs used** memory across runs.
+- **Failures:** attempts, kills (137/140) and retries per run.
+
+#### Compare runs
+
+Two or more runs against a baseline:
+- **Parameters:** params and annotations that differ.
+- **Versions:** revision, commit, profile, Nextflow version, script and config hashes, and
+  which processes' code changed (code checksum).
+- **Resources:** per-process change in median realtime, median peak RSS or CPU-hours,
+  as a ratio to the baseline.
+- **Samples:** a sample metric side by side for shared samples.
+- **Annotation vs resources:** for one annotation (e.g. `campaign`, `params.aligner`) and
+  a process, resource use per value across every run (MTCProv's
+  `correlate_parameter_runtime`).
+
+#### Process analytics: Dashboard
+
+Combined view for process-level analytics and execution metrics, across all runs.
 
 **Dashboard Tab:**
 - Process resource utilization charts (CPU%, memory%, duration)
 - Filter by process name
 - Historical execution table with all metrics
-- Summary statistics by process
+- Summary statistics by process (finished attempts only)
 - CPU utilization distribution (box plots)
-- Disk I/O & storage metrics
+- Input size & I/O metrics
 
 ---
 
-#### 2. Analytics
+#### Process analytics: Analytics
 
 Helps to understand resource patterns per process and identification of bottlenecks
 
 - Select process from dropdown
-- Correlation plots:
-  - Memory vs Disk Size (with R² correlation)
-  - CPU Cores Used vs Disk Size
-  - Duration vs Disk Size
-  - Data Read/Written vs Disk Size
+- Correlation plots against the task's input size (the sum of its input files' sizes,
+  from `lineage-import`):
+  - Memory vs Input Size (with R² correlation)
+  - CPU Cores Used vs Input Size
+  - Duration vs Input Size
+  - Data Read/Written vs Input Size
   - Memory vs I/O intensity
 - Process classification:
-  - **Memory-Heavy**: Memory/Disk ratio > 10×
-  - **Disk-Heavy**: Memory/Disk ratio < 0.5×
+  - **Memory-Heavy**: Memory/Input ratio > 10×
+  - **Input-Heavy**: Memory/Input ratio < 0.5×
   - **I/O-Intensive**: I/O intensity > 5×
   - **Compute-Intensive**: I/O intensity < 0.5×
 - Toggle log scale for better visualization
