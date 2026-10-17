@@ -171,6 +171,8 @@ def on_startup():
     SQLModel.metadata.create_all(engine)
     with engine.begin() as conn:
         conn.execute(text(LOGICAL_TASK_VIEW))
+        for statement in LINEAGE_DDL:
+            conn.execute(text(statement))
 
 
 # One row per logical task (MTCProv's function call) over its attempts (executions).
@@ -194,6 +196,60 @@ FROM processexecution
 WHERE task_name IS NOT NULL
 GROUP BY workflow_execution_id, task_name
 """
+
+# Provenance graph: one edge per (producing task -> consuming task, file).
+# - Within a run, by path: lineage-import records an input under the path its
+#   producer wrote it to, so this is exact (and works for files with no sha256).
+# - Across runs, by content: only for inputs no task of their own run produced
+#   (e.g. a results file of an earlier run). Content alone isn't used within a run:
+#   identical files (versions.yml, empty outputs) come from many unrelated tasks.
+LINEAGE_DDL = [
+    "CREATE INDEX IF NOT EXISTS ix_inputfile_sha256 ON processexecutioninputfile (sha256)",
+    "CREATE INDEX IF NOT EXISTS ix_inputfile_filename ON processexecutioninputfile (filename)",
+    "CREATE INDEX IF NOT EXISTS ix_outputfile_sha256 ON processexecutionoutputfile (sha256)",
+    "CREATE INDEX IF NOT EXISTS ix_outputfile_filename ON processexecutionoutputfile (filename)",
+    """
+CREATE OR REPLACE VIEW prov_graph AS
+SELECT o.process_execution_id AS producer_id, i.process_execution_id AS consumer_id,
+       i.filename, i.sha256, 'path' AS matched_by
+FROM processexecutioninputfile i
+JOIN processexecution ci ON ci.id = i.process_execution_id
+JOIN processexecutionoutputfile o ON o.filename = i.filename AND o.process_execution_id <> i.process_execution_id
+JOIN processexecution po ON po.id = o.process_execution_id AND po.workflow_execution_id = ci.workflow_execution_id
+UNION ALL
+SELECT o.process_execution_id, i.process_execution_id, i.filename, i.sha256, 'content'
+FROM processexecutioninputfile i
+JOIN processexecution ci ON ci.id = i.process_execution_id
+JOIN processexecutionoutputfile o ON o.sha256 = i.sha256
+JOIN processexecution po ON po.id = o.process_execution_id AND po.workflow_execution_id <> ci.workflow_execution_id
+WHERE NOT EXISTS (
+    SELECT 1 FROM processexecutionoutputfile o2
+    JOIN processexecution p2 ON p2.id = o2.process_execution_id
+    WHERE o2.filename = i.filename AND p2.workflow_execution_id = ci.workflow_execution_id)
+""",
+    # MTCProv's ancestors(): every task whose outputs a task depended on, transitively.
+    # UNION (not UNION ALL) visits each task once, so shared ancestors and cycles end.
+    """
+CREATE OR REPLACE FUNCTION process_ancestors(pid varchar) RETURNS TABLE (process_execution_id varchar)
+LANGUAGE sql STABLE AS $$
+WITH RECURSIVE a(id) AS (
+    SELECT producer_id FROM prov_graph WHERE consumer_id = pid
+    UNION
+    SELECT g.producer_id FROM prov_graph g JOIN a ON g.consumer_id = a.id)
+SELECT id FROM a
+$$
+""",
+    """
+CREATE OR REPLACE FUNCTION process_descendants(pid varchar) RETURNS TABLE (process_execution_id varchar)
+LANGUAGE sql STABLE AS $$
+WITH RECURSIVE d(id) AS (
+    SELECT consumer_id FROM prov_graph WHERE producer_id = pid
+    UNION
+    SELECT g.consumer_id FROM prov_graph g JOIN d ON g.producer_id = d.id)
+SELECT id FROM d
+$$
+""",
+]
 
 
 @app.post("/workflows/", response_model=WorkflowExecution)
@@ -557,6 +613,24 @@ def get_process_attempts(process_id: str, session: Session = Depends(get_session
         .order_by(ProcessExecution.start_time)
     ).all()
 
+def _related_processes(function: str, process_id: str, session: Session) -> List[ProcessExecution]:
+    if not session.get(ProcessExecution, process_id):
+        raise HTTPException(status_code=404, detail="Process not found")
+    ids = session.execute(text(f"SELECT process_execution_id FROM {function}(:pid)"), {"pid": process_id}).scalars().all()
+    return session.exec(
+        select(ProcessExecution).where(ProcessExecution.id.in_(ids)).order_by(ProcessExecution.start_time)
+    ).all()
+
+@app.get("/processes/{process_id}/ancestors", response_model=List[ProcessExecution])
+def get_process_ancestors(process_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
+    """Every task whose outputs this task depended on, transitively (also across runs; see prov_graph)."""
+    return _related_processes("process_ancestors", process_id, session)
+
+@app.get("/processes/{process_id}/descendants", response_model=List[ProcessExecution])
+def get_process_descendants(process_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
+    """Every task that depended on this task's outputs, transitively (also across runs)."""
+    return _related_processes("process_descendants", process_id, session)
+
 @app.delete("/processes/{process_id}")
 def delete_process(process_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
     process = session.get(ProcessExecution, process_id)
@@ -626,6 +700,49 @@ def delete_output_files(process_id: str, session: Session = Depends(get_session)
     )
     session.commit()
     return {"message": "Output files deleted successfully"}
+
+
+@app.get("/files/{sha256}/producers", response_model=List[ProcessExecutionOutputFile])
+def get_file_producers(sha256: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
+    """Every task output with this content, in any run."""
+    return session.exec(select(ProcessExecutionOutputFile).where(ProcessExecutionOutputFile.sha256 == sha256)).all()
+
+@app.get("/files/{sha256}/consumers", response_model=List[ProcessExecutionInputFile])
+def get_file_consumers(sha256: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
+    """Every task input with this content, in any run."""
+    return session.exec(select(ProcessExecutionInputFile).where(ProcessExecutionInputFile.sha256 == sha256)).all()
+
+
+@app.get("/compare_runs")
+def compare_runs(
+    key: str,
+    process_name: Optional[str] = None,
+    session: Session = Depends(get_session),
+    api_key: str = Depends(verify_api_key)
+):
+    """Resource use per value of a workflow annotation (e.g. `key=params.aligner`,
+    `key=campaign`) and process: tasks, runs, mean/max peak RSS, mean realtime and
+    %CPU. Only finished attempts (COMPLETED/CACHED) count. `process_name` filters
+    by substring."""
+    query = """
+    SELECT COALESCE(a.value_text, a.value_num::text) AS value,
+           p.process_name,
+           count(DISTINCT p.workflow_execution_id) AS runs,
+           count(*) AS tasks,
+           avg(p.peak_rss_mb) AS mean_peak_rss_mb,
+           max(p.peak_rss_mb) AS max_peak_rss_mb,
+           avg(p.realtime) AS mean_realtime_s,
+           avg(p.percent_cpu) AS mean_percent_cpu
+    FROM processexecution p
+    JOIN workflowannotation a ON a.workflow_execution_id = p.workflow_execution_id AND a.key = :key
+    WHERE p.final_status IN ('COMPLETED', 'CACHED')
+    """
+    params = {"key": key}
+    if process_name:
+        query += " AND p.process_name ILIKE :process_name"
+        params["process_name"] = f"%{process_name}%"
+    query += " GROUP BY 1, 2 ORDER BY 2, 1"
+    return [dict(r._mapping) for r in session.execute(text(query), params)]
 
 
 # ==================== Institute Endpoints ====================

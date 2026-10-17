@@ -162,6 +162,22 @@ Input and output file paths per task, each with a SHA-256 of its content — com
 by the importer itself after the run (`nf-lineage`'s own checksum is a metadata hash,
 not content). See [`lineage-import/README.md`](lineage-import/README.md).
 
+**Lineage graph.** The `prov_graph` SQL view links each task to the tasks whose outputs
+it read, one edge per file:
+- within a run, by path (exact, and works for files without a hash);
+- across runs, by content hash, for inputs that no task of their own run produced, e.g.
+  a published result of an earlier run used as input. Identical files from unrelated
+  tasks of the same run (`versions.yml`, empty outputs) are not linked.
+
+Queries on it:
+- `GET /processes/{id}/ancestors` and `/descendants`: all tasks upstream or downstream,
+  transitively (SQL functions `process_ancestors(id)` and `process_descendants(id)`);
+- `GET /files/{sha256}/producers` and `/consumers`: every task output or input with that
+  content, in any run;
+- `GET /compare_runs?key=<annotation>[&process_name=<substring>]`: resource use (tasks,
+  runs, mean/max peak RSS, mean realtime and %CPU) per value of a workflow annotation and
+  process, e.g. `key=params.aligner` or `key=campaign`. Only finished attempts count.
+
 ### 3. CO2 footprint (optional)
 
 CO2 and energy data comes from the [`nf-co2footprint`](https://nextflow-io.github.io/nf-co2footprint/)
