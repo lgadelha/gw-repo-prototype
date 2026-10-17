@@ -307,41 +307,6 @@ Two or more runs against a baseline:
   a process, resource use per value across every run (MTCProv's
   `correlate_parameter_runtime`).
 
-#### Process analytics: Dashboard
-
-Combined view for process-level analytics and execution metrics, across all runs.
-
-**Dashboard Tab:**
-- Process resource utilization charts (CPU%, memory%, duration)
-- Filter by process name
-- Historical execution table with all metrics
-- Summary statistics by process (finished attempts only)
-- CPU utilization distribution (box plots)
-- Input size & I/O metrics
-
----
-
-#### Process analytics: Analytics
-
-Helps to understand resource patterns per process and identification of bottlenecks
-
-- Select process from dropdown
-- Correlation plots against the task's input size (the sum of its input files' sizes,
-  from `lineage-import`):
-  - Memory vs Input Size (with R² correlation)
-  - CPU Cores Used vs Input Size
-  - Duration vs Input Size
-  - Data Read/Written vs Input Size
-  - Memory vs I/O intensity
-- Process classification:
-  - **Memory-Heavy**: Memory/Input ratio > 10×
-  - **Input-Heavy**: Memory/Input ratio < 0.5×
-  - **I/O-Intensive**: I/O intensity > 5×
-  - **Compute-Intensive**: I/O intensity < 0.5×
-- Toggle log scale for better visualization
-
----
-
 #### 3. ML Training
 
 Train resource prediction models here

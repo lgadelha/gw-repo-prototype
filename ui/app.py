@@ -36,9 +36,8 @@ navigation = st.navigation({
                       st.Page("nav/energy.py", title="Energy & CO2", icon=":material/eco:", url_path="energy")],
     "Across runs": [st.Page("nav/process_profile.py", title="Process profile", icon=":material/memory:", url_path="process"),
                     st.Page("nav/compare.py", title="Compare runs", icon=":material/compare_arrows:", url_path="compare")],
-    "Legacy": [st.Page("nav/analytics.py", title="Process analytics", icon=":material/query_stats:", url_path="analytics"),
-               st.Page("nav/optimization.py", title="Bayesian modelling", icon=":material/model_training:",
-                       url_path="optimization")],
+    "Optimization": [st.Page("nav/optimization.py", title="Bayesian modelling", icon=":material/model_training:",
+                             url_path="optimization")],
 })
 
 
