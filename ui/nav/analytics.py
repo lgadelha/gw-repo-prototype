@@ -4,6 +4,7 @@ from common import api_key
 from views import dashboard
 
 dashboard.API_KEY = api_key()
+st.caption(":material/history: Legacy page, kept as it was; Run detail and Process profile cover most of it.")
 df = dashboard.fetch_process_data(api_key())
 tabs = st.tabs(["📊 Dashboard", "📈 Analytics"])
 with tabs[0]:

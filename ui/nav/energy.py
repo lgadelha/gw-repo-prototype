@@ -1,11 +1,12 @@
 import streamlit as st
 
+from common import empty_state
 from views import energy
 
 all_runs = st.session_state['all_runs']
 selected = all_runs[all_runs['id'] == st.session_state.get('run')] if not all_runs.empty else all_runs
 if selected.empty:
     st.title("Energy & CO2")
-    st.info("Pick a run in the sidebar, or select one on the Runs page.")
+    empty_state("Pick a run in the sidebar, or select one on the Runs page.")
 else:
     energy.render(selected.iloc[0], st.session_state['filtered_runs'])

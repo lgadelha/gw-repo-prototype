@@ -6,10 +6,10 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from common import pipeline_label, run_label
+from common import pipeline_label, run_label, kpi, empty_state, STATE_COLOURS, institute_colours
 
 COLUMNS = {
-    'run_label': 'Run', 'pipeline': 'Pipeline', 'revision_id': 'Revision', 'commit': 'Commit',
+    'name': 'Run', 'pipeline': 'Pipeline', 'revision_id': 'Revision', 'commit': 'Commit',
     'profile': 'Profile', 'institute_id': 'Institute', 'data_size_tag': 'Size tag',
     'campaign': 'Campaign', 'state': 'State', 'start': 'Start', 'duration_h': 'Duration (h)',
     'logical_tasks': 'Tasks', 'retried': 'Retried', 'failed': 'Failed attempts',
@@ -21,18 +21,19 @@ COLUMNS = {
 def render(runs: pd.DataFrame, run_detail_page, compare_page):
     st.title("Runs")
     if runs.empty:
-        st.info("No runs match the filters. Run a pipeline with gwrepo.config, or widen the filters.")
+        empty_state("No runs match the filters. Run a pipeline with gwrepo.config, or widen the filters.")
         return
 
     c = st.columns(5)
-    c[0].metric("Runs", len(runs))
-    c[1].metric("Running", int((runs['state'] == 'RUNNING').sum()))
-    c[2].metric("Failed runs", int((runs['state'] == 'FAILED').sum()))
-    c[3].metric("CPU-hours used", f"{runs['cpu_hours_used'].sum():.2f}")
-    c[4].metric("Energy", f"{runs['energy_wh'].sum():.1f} Wh")
+    kpi(c[0], "Runs", len(runs))
+    kpi(c[1], "Running", int((runs['state'] == 'RUNNING').sum()))
+    kpi(c[2], "Failed runs", int((runs['state'] == 'FAILED').sum()))
+    kpi(c[3], "CPU-hours used", f"{runs['cpu_hours_used'].sum():.2f}")
+    kpi(c[4], "Energy", f"{runs['energy_wh'].sum():.1f} Wh")
 
     st.caption("Select one row to open the run, or several to compare them.")
-    table = runs.assign(duration_h=runs['duration'] / 3600)[list(COLUMNS)].rename(columns=COLUMNS)
+    table = runs.assign(duration_h=runs['duration'] / 3600,
+                        name=runs['run_name'].fillna(runs['id'].str[:8]))[list(COLUMNS)].rename(columns=COLUMNS)
     event = st.dataframe(
         table, hide_index=True, width="stretch", on_select="rerun", selection_mode="multi-row",
         column_config={
@@ -59,12 +60,13 @@ def render(runs: pd.DataFrame, run_detail_page, compare_page):
         return
     left, right = st.columns(2)
     with left:
-        fig = px.scatter(timed, x='start', y=timed['duration'] / 3600, color='state', symbol='pipeline',
+        fig = px.scatter(timed, x='start', y=timed['duration'] / 3600, color='state', symbol='pipeline', color_discrete_map=STATE_COLOURS,
                          hover_name='run_label', title="Run duration over time",
                          labels={'start': 'Start', 'y': 'Duration (h)', 'state': 'State', 'pipeline': 'Pipeline'})
         st.plotly_chart(fig, width="stretch")
     with right:
         fig = px.bar(timed.sort_values('start'), x='run_label', y='cpu_hours_used', color='institute_id',
+                     color_discrete_map=institute_colours(),
                      title="CPU-hours used per run",
                      labels={'run_label': 'Run', 'cpu_hours_used': 'CPU-hours', 'institute_id': 'Institute'})
         fig.update_xaxes(showticklabels=len(timed) <= 30)

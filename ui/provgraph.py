@@ -109,7 +109,7 @@ def process_dot(nodes: pd.DataFrame, edges: pd.DataFrame, metric: str, highlight
                 highlight_edges: set = frozenset()) -> str:
     """DOT for the process graph: fill colour by `metric`, bold red outline and
     edges for `highlight` (processes) / `highlight_edges` ((producer, consumer))."""
-    label, _, _, fmt = METRICS[metric]
+    fmt = METRICS[metric][3]
     lo, hi = nodes[metric].min(), nodes[metric].max()
     lines = ['digraph G {', 'rankdir=TB; nodesep=0.25; ranksep=0.35;',
              'node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=10];',
@@ -125,7 +125,6 @@ def process_dot(nodes: pd.DataFrame, edges: pd.DataFrame, metric: str, highlight
         extra = ', color="#d7191c", penwidth=2.5' if (r.producer, r.consumer) in highlight_edges else ''
         lines.append(f'{_q(r.producer)} -> {_q(r.consumer)} [label="{r.files} file{"s" if r.files != 1 else ""}'
                      f'{" · " + _size(r.bytes) if r.bytes else ""}"{extra}];')
-    lines.append(f'labelloc=b; label="Fill: {label} (light = low, dark red = high)"; fontsize=10;')
     lines.append('}')
     return '\n'.join(lines)
 

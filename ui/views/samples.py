@@ -8,7 +8,7 @@ import streamlit as st
 
 import comparison as cmp
 import runprofile as prof
-from common import api_get
+from common import api_get, page_header, empty_state, run_colours
 
 DEFAULT_KEYS = ('fastqc_raw-total_sequences', 'fastqc_raw-percent_gc', 'star-uniquely_mapped_percent',
                 'picard_mark_duplicates-PERCENT_DUPLICATION', 'salmon-percent_mapped', 'salmon-num_processed')
@@ -25,10 +25,10 @@ def _run_samples(wf):
 
 
 def render(run: pd.Series, filtered_runs: pd.DataFrame):
-    st.title(f"Samples · {run['run_label']}")
+    page_header("Samples", run)
     wide, res = _run_samples(run['id'])
     if wide.empty:
-        st.info("No sample metrics for this run: run multiqc-import (submit_run.py) after an nf-core pipeline.")
+        empty_state("No sample metrics for this run: run multiqc-import (submit_run.py) after an nf-core pipeline.")
         return
     numeric_keys = [k for k in wide.columns if pd.api.types.is_numeric_dtype(pd.to_numeric(wide[k], errors='coerce'))
                     and pd.to_numeric(wide[k], errors='coerce').notna().any()]
@@ -57,10 +57,11 @@ def render(run: pd.Series, filtered_runs: pd.DataFrame):
         points.append(joined.assign(run=labels.get(wf, run['run_label'])))
     data = pd.concat(points) if points else pd.DataFrame()
     if data.empty:
-        st.info("No run in scope has both this metric and tasks tagged with its samples.")
+        empty_state("No run in scope has both this metric and tasks tagged with its samples.")
         return
     data[x] = pd.to_numeric(data[x], errors='coerce')
     fig = px.scatter(data.dropna(subset=[x, y]), x=x, y=y, color='run', hover_name='sample',
+                     color_discrete_map=run_colours(labels),
                      labels={y: RESOURCES[y], 'run': 'Run'})
     st.plotly_chart(fig, width="stretch")
     st.caption(f"{len(data)} samples from {data['run'].nunique()} run(s).")
