@@ -7,24 +7,24 @@ import streamlit as st
 
 import provgraph as pg
 import runprofile as prof
-from common import api_get, fmt_duration, fmt_mb, graph_view
+from common import api_get, fmt_duration, fmt_mb, graph_view, page_header, kpi, empty_state
 
 MAX_SUBGRAPH_NODES = 200
 MAX_FILE_LOOKUPS = 50
 
 
 def render(run: pd.Series, all_runs: pd.DataFrame):
-    st.title(f"Provenance · {run['run_label']}")
+    page_header("Provenance", run)
     rows = api_get(f"/workflows/{run['id']}/task_profile")
     if rows is None:
         return
     if not rows:
-        st.info("No tasks recorded for this run yet.")
+        empty_state("No tasks recorded for this run yet.")
         return
     tasks = prof.add_task_metrics(pd.DataFrame(rows))
     edges = pd.DataFrame(api_get(f"/workflows/{run['id']}/graph") or [])
     if edges.empty:
-        st.info("No lineage edges for this run: run lineage-import (submit_run.py) after the pipeline.")
+        empty_state("No lineage edges for this run: run lineage-import (submit_run.py) after the pipeline.")
     internal = pg.internal_edges(edges, run['id'])
     path, total = pg.critical_path(tasks, internal) if not internal.empty else ([], 0.0)
     run_labels = dict(zip(all_runs['id'], all_runs['run_label']))
@@ -66,24 +66,29 @@ def _process_graph(tasks, internal, path):
     nodes, agg = pg.process_graph(tasks, internal)
     proc = dict(zip(tasks['id'], tasks['process_name']))
     on_path = [proc[t] for t in path]
+    label, fmt = pg.METRICS[metric][0], pg.METRICS[metric][3]
+    lo, hi = nodes[metric].min(), nodes[metric].max()
     graph_view(pg.process_dot(nodes, agg, metric, highlight=set(on_path),
-                              highlight_edges=set(zip(on_path, on_path[1:]))), height=700)
+                              highlight_edges=set(zip(on_path, on_path[1:]))), height=700,
+               legend=[(f"linear-gradient(90deg, {', '.join(pg.PALETTE)})",
+                        f"{label}: {fmt.format(lo) if pd.notna(lo) else '–'} → {fmt.format(hi) if pd.notna(hi) else '–'}"),
+                       ("#fff; border: 2px solid #d7191c", "On the critical path")])
     st.caption(f"{len(nodes)} processes, {len(agg)} producer → consumer links (labels: files · bytes read). "
-               "Red outline: processes on the critical path. Scroll to zoom, drag to pan.")
+               "Scroll to zoom, drag to pan.")
 
 
 def _critical_path(tasks, path, total, run):
     if not path:
-        st.info("No dependency graph to compute a critical path from.")
+        empty_state("No dependency graph to compute a critical path from.")
         return
     startup, span = prof.task_span(tasks, run['start_time'])
     c = st.columns(4)
-    c[0].metric("Critical path", fmt_duration(total), help="Longest chain of dependent tasks, by Nextflow duration")
-    c[1].metric("Share of task span", f"{100 * total / span:.0f}%" if span else '–',
-                help="Task span: first task's start to last task's end")
-    c[2].metric("Tasks on it", len(path))
-    c[3].metric("Before first task", fmt_duration(startup),
-                help="Workflow start to first task start: fetching the pipeline, staging remote inputs")
+    kpi(c[0], "Critical path", fmt_duration(total), help="Longest chain of dependent tasks, by Nextflow duration")
+    kpi(c[1], "Share of task span", f"{100 * total / span:.0f}%" if span else '–',
+        help="Task span: first task's start to last task's end")
+    kpi(c[2], "Tasks on it", len(path))
+    kpi(c[3], "Before first task", fmt_duration(startup),
+        help="Workflow start to first task start: fetching the pipeline, staging remote inputs")
     on = tasks.set_index('id').loc[path].reset_index()
     st.dataframe(on.assign(share=100 * on['duration'] / total)[['task_name', 'process', 'duration', 'share', 'start']],
                  hide_index=True, width="stretch",
@@ -110,7 +115,7 @@ def _lineage(focus, tasks, run, run_labels):
     st.caption(f"{len(nodes) - 1} {direction if direction != 'both' else 'ancestors and descendants'} "
                f"of **{focus['task_name']}**")
     if len(nodes) == 1:
-        st.info(f"This task has no {direction} in the lineage graph.")
+        empty_state(f"This task has no {direction} in the lineage graph.")
         return
     edge_rows = []
     for wf in nodes['workflow_execution_id'].unique():
@@ -122,8 +127,10 @@ def _lineage(focus, tasks, run, run_labels):
         st.warning(f"{len(nodes)} tasks are too many to draw; showing direct neighbours only.")
         edges = edges[(edges['producer_id'] == focus['id']) | (edges['consumer_id'] == focus['id'])]
         nodes = nodes[nodes['id'].isin(set(edges['producer_id']) | set(edges['consumer_id']) | {focus['id']})]
-    graph_view(pg.task_dot(nodes, edges, focus['id'], run_labels), height=500)
-    st.caption("Orange: the selected task. Dashed blue: matched by content across runs. Red fill: not finished.")
+    graph_view(pg.task_dot(nodes, edges, focus['id'], run_labels), height=500,
+               legend=[("#fdae61", "Selected task"), ("#f4a6a6", "Not finished"), ("#f0f0f0", "Finished"),
+                       ("repeating-linear-gradient(90deg, #2b83ba 0 4px, transparent 4px 7px); height: 2px; border: 0",
+                        "Matched by content across runs")])
     other = nodes[nodes['workflow_execution_id'] != run['id']]
     if not other.empty:
         st.info(f"{len(other)} of these tasks belong to other runs: "
@@ -155,7 +162,12 @@ def _inspector(focus, tasks, edges, run, run_labels):
     if len(attempts) > 1:
         st.markdown("**Attempts**")
         st.dataframe(attempts[['attempt', 'final_status', 'exit_code', 'memory_requested', 'peak_rss', 'realtime']],
-                     hide_index=True, width="stretch")
+                     hide_index=True, width="stretch",
+                     column_config={'attempt': 'Attempt', 'final_status': 'Status', 'exit_code': 'Exit code',
+                                    'memory_requested': st.column_config.NumberColumn('Memory requested (MB)',
+                                                                                      format="%.0f"),
+                                    'peak_rss': st.column_config.NumberColumn('Peak RSS (MB)', format="%.0f"),
+                                    'realtime': st.column_config.NumberColumn('Realtime (s)', format="%.1f")})
 
     params = pd.DataFrame(api_get(f"/workflows/{run['id']}/parameters") or [])
     if not params.empty:
@@ -168,7 +180,7 @@ def _inspector(focus, tasks, edges, run, run_labels):
 
     files = pd.DataFrame(api_get(f"/workflows/{run['id']}/files") or [])
     if files.empty:
-        st.info("No file rows for this task: run lineage-import.")
+        empty_state("No file rows for this task: run lineage-import.")
         return
     files = files[files['process_execution_id'] == focus['id']]
     names = dict(zip(tasks['id'], tasks['task_name']))
@@ -209,7 +221,7 @@ def _inspector(focus, tasks, edges, run, run_labels):
 def _file_inspector(run, run_labels):
     files = pd.DataFrame(api_get(f"/workflows/{run['id']}/files") or [])
     if files.empty:
-        st.info("No file rows for this run: run lineage-import.")
+        empty_state("No file rows for this run: run lineage-import.")
         return
     query = st.text_input("Find a file of this run", placeholder="file name or SHA-256 prefix, e.g. multiqc_report")
     if not query:
@@ -220,7 +232,7 @@ def _file_inspector(run, run_labels):
                  | files['sha256'].fillna('').str.startswith(query.lower())]
     hits = hits.drop_duplicates('sha256')
     if hits.empty:
-        st.info("No file of this run matches.")
+        empty_state("No file of this run matches.")
         return
     labels = {r.sha256: f"{r.filename.rsplit('/', 1)[-1]} · {r.direction} · {r.sha256[:12] if r.sha256 else 'no hash'}"
               for r in hits.itertuples()}

@@ -9,20 +9,20 @@ import streamlit as st
 
 import provgraph as pg
 import runprofile as prof
-from common import api_get, fmt_duration, fmt_mb
+from common import api_get, fmt_duration, fmt_mb, page_header, kpi, empty_state
 
 MAX_LABELLED_TASKS = 60
 
 
 def render(run: pd.Series):
-    st.title(f"Run {run['run_label']}")
+    page_header("Run detail", run)
     st.caption(f"Workflow ID `{run['id']}` · pipeline {run['pipeline']}")
 
     rows = api_get(f"/workflows/{run['id']}/task_profile")
     if rows is None:
         return
     if not rows:
-        st.info("No tasks recorded for this run yet.")
+        empty_state("No tasks recorded for this run yet.")
         return
     tasks = prof.add_task_metrics(pd.DataFrame(rows))
     logical = pd.DataFrame(api_get(f"/workflows/{run['id']}/logical_tasks") or [])
@@ -51,39 +51,37 @@ def render(run: pd.Series):
 
 def _kpis(run, tasks, critical):
     c = st.columns(5)
-    c[0].metric("Wall time", fmt_duration(run['duration']), help="From the workflow's begin to complete")
     startup, span = prof.task_span(tasks, run['start_time'])
-    c[0].caption(f"State: **{run['state']}**" + (f" · first task after {fmt_duration(startup)}, tasks then ran "
-                                                  f"for {fmt_duration(span)}" if startup is not None else ''))
+    kpi(c[0], "Wall time", fmt_duration(run['duration']), help="From the workflow's begin to complete",
+        caption=f"First task after {fmt_duration(startup)}, tasks then ran for {fmt_duration(span)}"
+        if startup is not None else None)
     logical_n = int(run['logical_tasks']) if pd.notna(run['logical_tasks']) else len(tasks)
-    c[1].metric("Tasks", logical_n, help="Logical tasks; retries of a task count once")
-    c[1].caption(f"{int(run['finished'])} finished · {int(run['failed'])} failed attempts · "
-                 f"{int(run['cached'])} cached · {int(run['retried'] or 0)} retried")
+    kpi(c[1], "Tasks", logical_n, help="Logical tasks; retries of a task count once",
+        caption=f"{int(run['finished'])} finished · {int(run['failed'])} failed attempts · "
+                f"{int(run['cached'])} cached · {int(run['retried'] or 0)} retried")
     used, allocated = run['cpu_hours_used'], run['cpu_hours_allocated']
-    c[2].metric("CPU-hours used", f"{used:.3f}" if pd.notna(used) else '–',
-                help="Σ realtime × %CPU / 100 over every attempt")
-    if pd.notna(used) and allocated:
-        c[2].caption(f"{100 * used / allocated:.0f}% of {allocated:.3f} allocated (realtime × CPUs requested)")
-    c[3].metric("Peak task memory", fmt_mb(tasks['peak_rss'].max()))
+    kpi(c[2], "CPU-hours used", f"{used:.3f}" if pd.notna(used) else '–',
+        help="Σ realtime × %CPU / 100 over every attempt",
+        caption=f"{100 * used / allocated:.0f}% of {allocated:.3f} allocated (realtime × CPUs requested)"
+        if pd.notna(used) and allocated else None)
+    kpi(c[3], "Peak task memory", fmt_mb(tasks['peak_rss'].max()))
     waits = tasks['queue_wait_s'].dropna()
-    c[4].metric("Queue wait (median)", fmt_duration(waits.median()) if not waits.empty else '–',
-                help="Start − submit: time a task waited in the executor's queue")
-    if not waits.empty:
-        c[4].caption(f"max {fmt_duration(waits.max())}")
+    kpi(c[4], "Queue wait", fmt_duration(waits.median()) if not waits.empty else '–',
+        help="Start − submit: time a task waited in the executor's queue",
+        caption=f"median · max {fmt_duration(waits.max())}" if not waits.empty else None)
     hosts = [f"{e}: {', '.join(sorted(tasks.loc[tasks['executor'] == e, 'cpu_model'].dropna().unique())) or '?'}"
              for e in sorted(tasks['executor'].dropna().unique())] if 'executor' in tasks else []
     if hosts:
         st.caption("Executor and CPU model: " + " · ".join(hosts))
     c = st.columns(5)
-    c[4].metric("Critical path", fmt_duration(critical),
-                help="Longest chain of dependent tasks, by Nextflow duration (see Provenance)")
-    if critical and span:
-        c[4].caption(f"{100 * critical / span:.0f}% of the task span")
-    c[0].metric("Data read", fmt_mb(tasks['read_bytes'].sum() / 2**20), help="Σ read_bytes (storage reads)")
-    c[1].metric("Data written", fmt_mb(tasks['write_bytes'].sum() / 2**20), help="Σ write_bytes (storage writes)")
-    c[2].metric("Energy", f"{run['energy_wh']:.2f} Wh" if pd.notna(run['energy_wh']) else '–',
-                help="From nf-co2footprint (co2-import)")
-    c[3].metric("CO2e", f"{run['co2e_g']:.2f} g" if pd.notna(run['co2e_g']) else '–')
+    kpi(c[0], "Data read", fmt_mb(tasks['read_bytes'].sum() / 2**20), help="Σ read_bytes (storage reads)")
+    kpi(c[1], "Data written", fmt_mb(tasks['write_bytes'].sum() / 2**20), help="Σ write_bytes (storage writes)")
+    kpi(c[2], "Energy", f"{run['energy_wh']:.2f} Wh" if pd.notna(run['energy_wh']) else '–',
+        help="From nf-co2footprint (co2-import)")
+    kpi(c[3], "CO2e", f"{run['co2e_g']:.2f} g" if pd.notna(run['co2e_g']) else '–')
+    kpi(c[4], "Critical path", fmt_duration(critical),
+        help="Longest chain of dependent tasks, by Nextflow duration (see Provenance)",
+        caption=f"{100 * critical / span:.0f}% of the task span" if critical and span else None)
 
 
 def _timeline(tasks):
@@ -96,7 +94,7 @@ def _timeline(tasks):
     instant = df['end'] <= df['start']  # Nextflow reports realtime 0 ms for sub-second commands
     df = df.assign(bar_end=df['end'].where(~instant, df['start'] + pd.Timedelta(seconds=1)))
     if df.empty:
-        st.info("No tasks with a start time and runtime to show.")
+        empty_state("No tasks with a start time and runtime to show.")
         return
     color = st.radio("Colour by", ["process", "final_status"], horizontal=True,
                      format_func=lambda c: {"process": "Process", "final_status": "Status"}[c])
@@ -144,7 +142,7 @@ def _concurrency(tasks):
 def _process_table(tasks):
     table = prof.process_table(tasks)
     if table.empty:
-        st.info("No finished tasks yet.")
+        empty_state("No finished tasks yet.")
         return
     st.subheader("Per process")
     st.caption("Finished attempts only. Efficiency = used / requested (median over tasks). "
@@ -184,7 +182,7 @@ def _cost(tasks):
     metric = st.radio("Measure", list(COST_METRICS), horizontal=True, format_func=COST_METRICS.get)
     df = tasks[tasks[metric].fillna(0) > 0].assign(subworkflow=lambda d: d['subworkflow'].replace('', '(top level)'))
     if df.empty:
-        st.info(f"No {COST_METRICS[metric].lower()} recorded for this run.")
+        empty_state(f"No {COST_METRICS[metric].lower()} recorded for this run.")
         return
     fig = px.treemap(df, path=[px.Constant('run'), 'subworkflow', 'process'], values=metric,
                      title=f"{COST_METRICS[metric]} by subworkflow and process")
@@ -217,7 +215,7 @@ def _io(tasks):
     st.plotly_chart(fig, width="stretch")
     sized = tasks[(tasks['input_mb'] > 0) & (tasks['output_mb'] > 0)]
     if sized.empty:
-        st.info("No input/output sizes: run lineage-import.")
+        empty_state("No input/output sizes: run lineage-import.")
         return
     fig = px.scatter(sized, x='input_mb', y='output_mb', color='process', log_x=True, log_y=True,
                      hover_name='task_name', title="Output size vs input size per task",
@@ -235,7 +233,7 @@ def _rightsizing(tasks):
     df = prof.rightsizing(tasks, resource)
     unit = prof.RESOURCES[resource][2]
     if df.empty:
-        st.info(f"No finished tasks with a {resource} request.")
+        empty_state(f"No finished tasks with a {resource} request.")
         return
     fig = px.scatter(df, x='requested', y='used', color='process', symbol='flag', log_x=True, log_y=True,
                      hover_name='task_name', hover_data={'efficiency': ':.0%'},
@@ -288,7 +286,7 @@ def _params_and_versions(run):
 
     annotations = pd.DataFrame(api_get(f"/workflows/{run['id']}/annotations/") or [])
     if annotations.empty:
-        st.info("No params or annotations recorded for this run.")
+        empty_state("No params or annotations recorded for this run.")
         return
     annotations['value'] = annotations['value_text'].where(annotations['value_text'].notna(),
                                                           annotations['value_num'].astype(str))
@@ -296,7 +294,8 @@ def _params_and_versions(run):
     other = annotations[~annotations['key'].str.startswith('params.')]
     if not other.empty:
         st.subheader("Annotations")
-        st.dataframe(other[['key', 'value']], hide_index=True, width="stretch")
+        st.dataframe(other[['key', 'value']], hide_index=True, width="stretch",
+                     column_config={'key': 'Annotation', 'value': 'Value'})
     st.subheader("Pipeline parameters")
     genomes = params['key'].str.startswith('params.genomes.')
     show_genomes = st.toggle(f"Show the genomes catalog ({int(genomes.sum())} entries)", value=False)

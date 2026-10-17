@@ -4,6 +4,7 @@ ui/views/, pure computations in ui/runprofile.py. See PLAN-frontend.md."""
 
 import os
 import time
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -11,7 +12,11 @@ import streamlit as st
 from common import api_get, api_key, clear_api_cache
 from views import runs
 
-st.set_page_config(page_title="GW-RePO (Genomic Workflow Resource and Parameter Optimization)", layout="wide")
+STATIC = Path(__file__).parent / "static"
+st.set_page_config(page_title="GW-RePO", page_icon=str(STATIC / "icon.svg"), layout="wide")
+st.logo(str(STATIC / "logo.svg"), icon_image=str(STATIC / "icon.svg"), size="large")
+st.session_state['_error_box'] = st.container()  # API errors, once each, above the page (common.api_get)
+st.session_state['_errors_shown'] = set()
 
 REFRESH_S = 15
 
@@ -24,16 +29,16 @@ if 'run' not in st.session_state:
 # Each page is a small script in ui/nav/ (file pages, so AppTest can switch to them);
 # they read the run list that the sidebar below puts in session state.
 navigation = st.navigation({
-    "Observability": [st.Page("nav/runs.py", title="Runs", icon="📋", url_path="runs", default=True),
-                      st.Page("nav/run_detail.py", title="Run detail", icon="🔍", url_path="run"),
-                      st.Page("nav/provenance.py", title="Provenance", icon="🧬", url_path="provenance"),
-                      st.Page("nav/samples.py", title="Samples", icon="🧪", url_path="samples"),
-                      st.Page("nav/energy.py", title="Energy & CO2", icon="🌱", url_path="energy")],
-    "Across runs": [st.Page("nav/process_profile.py", title="Process profile", icon="⚙️", url_path="process"),
-                    st.Page("nav/compare.py", title="Compare runs", icon="⚖️", url_path="compare"),
-                    st.Page("nav/analytics.py", title="Process analytics", icon="📈", url_path="analytics")],
-    "Resource optimization": [st.Page("nav/optimization.py", title="Bayesian modelling", icon="🤖",
-                                      url_path="optimization")],
+    "Observability": [st.Page("nav/runs.py", title="Runs", icon=":material/list_alt:", url_path="runs", default=True),
+                      st.Page("nav/run_detail.py", title="Run detail", icon=":material/monitoring:", url_path="run"),
+                      st.Page("nav/provenance.py", title="Provenance", icon=":material/account_tree:", url_path="provenance"),
+                      st.Page("nav/samples.py", title="Samples", icon=":material/science:", url_path="samples"),
+                      st.Page("nav/energy.py", title="Energy & CO2", icon=":material/eco:", url_path="energy")],
+    "Across runs": [st.Page("nav/process_profile.py", title="Process profile", icon=":material/memory:", url_path="process"),
+                    st.Page("nav/compare.py", title="Compare runs", icon=":material/compare_arrows:", url_path="compare")],
+    "Legacy": [st.Page("nav/analytics.py", title="Process analytics", icon=":material/query_stats:", url_path="analytics"),
+               st.Page("nav/optimization.py", title="Bayesian modelling", icon=":material/model_training:",
+                       url_path="optimization")],
 })
 
 
@@ -57,30 +62,33 @@ def run_filters(df: pd.DataFrame) -> pd.DataFrame:
 
 
 with st.sidebar:
-    st.text_input("API Key", type="password", key="api_key")
+    with st.expander("Connection", icon=":material/key:", expanded=not api_key()):
+        st.text_input("API Key", type="password", key="api_key")
     all_runs = pd.DataFrame()
     filtered_runs = all_runs
     if api_key():
         all_runs = runs.prepare(api_get("/workflows/summary") or [])
     if not all_runs.empty:
         st.subheader("Runs")
-        filtered_runs = run_filters(all_runs)
+        with st.expander("Filters", icon=":material/filter_list:"):
+            filtered_runs = run_filters(all_runs)
+        st.caption(f"Showing {len(filtered_runs)} of {len(all_runs)} runs")
         options = filtered_runs['id'].tolist()
         current = st.session_state.get('run')
         if current in all_runs['id'].values and current not in options:
             options = [current] + options  # keep a linked or selected run visible whatever the filters
         labels = dict(zip(all_runs['id'], all_runs['run_label']))
-        choice = st.selectbox("Run", options, index=options.index(current) if current in options else 0,
-                              format_func=labels.get) if options else None
+        pick, refresh = st.columns([5, 1], vertical_alignment="bottom")
+        choice = pick.selectbox("Run", options, index=options.index(current) if current in options else 0,
+                                format_func=labels.get) if options else None
+        if refresh.button("", icon=":material/refresh:", help="Data is cached for 30 s; this fetches it now"):
+            st.cache_data.clear()
+            st.rerun()
         st.session_state['run'] = choice
         if choice:
             st.query_params['run'] = choice
     st.session_state['all_runs'] = all_runs
     st.session_state['filtered_runs'] = filtered_runs
-    st.divider()
-    if st.button("🔄 Refresh data", help="Data is cached for 30 s; this fetches it now"):
-        st.cache_data.clear()
-        st.rerun()
     st.session_state['_last_full_run'] = time.time()
     running = not filtered_runs.empty and (filtered_runs['state'] == 'RUNNING').any()
     if running and st.toggle(f"Auto-refresh every {REFRESH_S} s", value=True, key='auto_refresh',
@@ -96,6 +104,6 @@ with st.sidebar:
         _tick()
 
 if not api_key():
-    st.warning("Please enter your API key in the sidebar to authenticate.")
+    st.warning("Enter your API key under Connection in the sidebar.", icon=":material/key:")
 else:
     navigation.run()

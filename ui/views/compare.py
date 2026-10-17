@@ -9,7 +9,7 @@ import streamlit as st
 
 import comparison as cmp
 import runprofile as prof
-from common import api_get
+from common import api_get, empty_state, run_colours
 
 VERSION_FIELDS = {'repository': 'Repository', 'revision_id': 'Revision', 'commit_id': 'Commit',
                   'profile': 'Profile', 'nextflow_version': 'Nextflow', 'script_id': 'Main script hash',
@@ -25,7 +25,7 @@ def render(all_runs: pd.DataFrame, filtered_runs: pd.DataFrame):
     chosen = st.multiselect("Runs", options, default=chosen or options[:2], format_func=labels.get)
     st.session_state['compare'] = chosen
     if len(chosen) < 2:
-        st.info("Pick at least two runs (or select several rows on the Runs page).")
+        empty_state("Pick at least two runs (or select several rows on the Runs page).")
         return
     baseline = st.selectbox("Baseline", chosen, format_func=labels.get,
                             help="Resource changes are ratios to this run")
@@ -84,7 +84,7 @@ def _versions(all_runs, chosen, short, tasks):
 
 def _resources(tasks, baseline, short):
     if baseline not in tasks or len(tasks) < 2:
-        st.info("Resource comparison needs task data for the baseline and at least one other run.")
+        empty_state("Resource comparison needs task data for the baseline and at least one other run.")
         return
     resource = st.radio("Resource", list(cmp.RESOURCE_MEDIANS), horizontal=True,
                         format_func=lambda r: cmp.RESOURCE_MEDIANS[r][2])
@@ -92,12 +92,13 @@ def _resources(tasks, baseline, short):
     ratio_cols = [c for c in table.columns if c.startswith('ratio:')]
     ratios = table[ratio_cols].dropna(how='all').head(TOP_CHANGES)
     if ratios.empty:
-        st.info("No process ran in both the baseline and another run.")
+        empty_state("No process ran in both the baseline and another run.")
         return
     long = ratios.rename(columns=lambda c: short[c.split(':', 1)[1]]).rename_axis('process_name').reset_index() \
         .melt(id_vars='process_name', var_name='run', value_name='ratio').dropna()
     long['process'] = long['process_name'].str.rsplit(':', n=1).str[-1]
     fig = px.bar(long, y='process', x='ratio', color='run', barmode='group', orientation='h', log_x=True,
+                 color_discrete_map=run_colours(short),
                  hover_data={'process_name': True},
                  title=f"{cmp.RESOURCE_MEDIANS[resource][2]} relative to {short[baseline]} "
                        f"(top {len(ratios)} changes)",
@@ -116,12 +117,12 @@ def _samples(chosen, short):
             for w in chosen}
     wide = {w: t for w, t in wide.items() if not t.empty}
     if len(wide) < 2:
-        st.info("Sample metrics (multiqc-import) exist for fewer than two of these runs.")
+        empty_state("Sample metrics (multiqc-import) exist for fewer than two of these runs.")
         return
     shared = set.intersection(*(set(t.index) for t in wide.values()))
     keys = sorted(set.intersection(*(set(t.columns) for t in wide.values())))
     if not shared or not keys:
-        st.info("These runs share no sample names or metrics.")
+        empty_state("These runs share no sample names or metrics.")
         return
     key = st.selectbox("Metric", keys, index=next((i for i, k in enumerate(keys) if 'total_sequences' in k), 0))
     table = pd.DataFrame({short[w]: t.loc[sorted(shared), key] for w, t in wide.items()})
@@ -130,6 +131,7 @@ def _samples(chosen, short):
     if numeric.notna().any().any():
         fig = px.bar(numeric.rename_axis('sample').reset_index().melt(id_vars='sample', var_name='run'),
                      x='sample', y='value', color='run', barmode='group', title=key,
+                     color_discrete_map=run_colours(short),
                      labels={'sample': 'Sample', 'value': key, 'run': 'Run'})
         st.plotly_chart(fig, width="stretch")
 
@@ -140,7 +142,7 @@ def _annotation(chosen):
         keys |= {a['key'] for a in api_get(f"/workflows/{w}/annotations/") or []
                  if not a['key'].startswith('params.genomes.')}
     if not keys:
-        st.info("These runs have no annotations.")
+        empty_state("These runs have no annotations.")
         return
     keys = sorted(keys)
     c = st.columns(2)
@@ -149,15 +151,19 @@ def _annotation(chosen):
     st.caption("Across every run that has this annotation, not only the selected ones (MTCProv's "
                "correlate_parameter_runtime). Finished attempts only.")
     if not process:
-        st.info("Enter a process to compare its resource use per annotation value.")
+        empty_state("Enter a process to compare its resource use per annotation value.")
         return
     rows = pd.DataFrame(api_get("/compare_runs", key=key, process_name=process) or [])
     if rows.empty:
-        st.info("No finished tasks of a matching process in runs with this annotation.")
+        empty_state("No finished tasks of a matching process in runs with this annotation.")
         return
     rows['process'] = rows['process_name'].str.rsplit(':', n=1).str[-1]
     fig = px.bar(rows, x='value', y='mean_peak_rss_mb', color='process', barmode='group',
                  hover_data=['runs', 'tasks', 'max_peak_rss_mb', 'mean_realtime_s'],
                  labels={'value': key, 'mean_peak_rss_mb': 'Mean peak RSS (MB)', 'process': 'Process'})
     st.plotly_chart(fig, width="stretch")
-    st.dataframe(rows.drop(columns='process'), hide_index=True, width="stretch")
+    st.dataframe(rows.drop(columns='process'), hide_index=True, width="stretch",
+                 column_config={'value': key, 'process_name': 'Process', 'runs': 'Runs', 'tasks': 'Tasks',
+                                'mean_peak_rss_mb': st.column_config.NumberColumn('Mean peak RSS (MB)', format="%.0f"),
+                                'max_peak_rss_mb': st.column_config.NumberColumn('Max peak RSS (MB)', format="%.0f"),
+                                'mean_realtime_s': st.column_config.NumberColumn('Mean realtime (s)', format="%.1f")})

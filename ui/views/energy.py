@@ -7,30 +7,30 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from common import api_get, fmt_duration
+from common import api_get, fmt_duration, page_header, kpi, empty_state, institute_colours
 
 TOP_PROCESSES = 20
 
 
 def render(run: pd.Series, filtered_runs: pd.DataFrame):
-    st.title(f"Energy & CO2 · {run['run_label']}")
+    page_header("Energy & CO2", run)
     rows = pd.DataFrame(api_get(f"/workflows/{run['id']}/co2/tasks") or [])
     if rows.empty:
-        st.info("No CO2 data for this run: run the pipeline with nf-co2footprint, then co2-import (submit_run.py).")
+        empty_state("No CO2 data for this run: run the pipeline with nf-co2footprint, then co2-import (submit_run.py).")
         _over_time(filtered_runs)
         return
     summary = api_get(f"/workflows/{run['id']}/co2/", _quiet=True)  # 404 without nf-co2footprint's summary file
 
     c = st.columns(5)
-    c[0].metric("Energy", f"{rows['energy_consumption_mwh'].sum() / 1000:.2f} Wh")
-    c[1].metric("CO2e", f"{rows['co2e_mg'].sum() / 1000:.2f} g")
-    c[2].metric("Car equivalent", f"{summary['car_km_equivalent'] * 1000:.1f} m" if summary else '–',
-                help="nf-co2footprint's summary: distance driven by an average car for the same CO2e")
-    c[3].metric("Tree time", fmt_duration(summary['tree_sequestration_time_sec']) if summary else '–',
-                help="nf-co2footprint's summary: time a tree takes to absorb the same CO2e")
+    kpi(c[0], "Energy", f"{rows['energy_consumption_mwh'].sum() / 1000:.2f} Wh")
+    kpi(c[1], "CO2e", f"{rows['co2e_mg'].sum() / 1000:.2f} g")
+    kpi(c[2], "Car equivalent", f"{summary['car_km_equivalent'] * 1000:.1f} m" if summary else '–',
+        help="nf-co2footprint's summary: distance driven by an average car for the same CO2e")
+    kpi(c[3], "Tree time", fmt_duration(summary['tree_sequestration_time_sec']) if summary else '–',
+        help="nf-co2footprint's summary: time a tree takes to absorb the same CO2e")
     intensity = rows['carbon_intensity_gco2e_kwh']
-    c[4].metric("Carbon intensity", f"{intensity.median():.0f} gCO2e/kWh",
-                help=f"Used by nf-co2footprint; range {intensity.min():.0f}–{intensity.max():.0f}")
+    kpi(c[4], "Carbon intensity", f"{intensity.median():.0f}", caption="gCO2e/kWh",
+        help=f"Used by nf-co2footprint; range {intensity.min():.0f}–{intensity.max():.0f}")
     models = rows.groupby('cpu_model')['powerdraw_cpu_w'].first()
     st.caption("CPU model and power draw per core assumed: "
                + " · ".join(f"{m} ({w:g} W)" for m, w in models.items()))
@@ -65,7 +65,8 @@ def _over_time(filtered_runs):
     if len(runs) < 2:
         return
     st.subheader("Runs in the filter")
-    fig = px.scatter(runs, x='start', y='co2e_g', color='institute_id', size='energy_wh', hover_name='run_label',
+    fig = px.scatter(runs, x='start', y='co2e_g', color='institute_id', size='energy_wh',
+                     color_discrete_map=institute_colours(), hover_name='run_label',
                      title="CO2e per run", labels={'start': 'Start', 'co2e_g': 'CO2e (g)', 'institute_id': 'Institute',
                                                    'energy_wh': 'Energy (Wh)'})
     st.plotly_chart(fig, width="stretch")
