@@ -505,7 +505,7 @@ All settings in `.env`:
 # Related publicatons
 
 - Gadelha, L., Heyl, F., Mauer, K., Narcı, K., Hazal Sezer, Z., Behrens, A., Iyappan, A., Kırlı, K. (2025). Toward a Provenance-Aware Observability Framework for Human Genomics Computational Workflows. Proceedings of the ProvenanceWeek 2025, 46–51. DOI: [10.1145/3736229.3736267](https://doi.org/10.1145/3736229.3736267)
-
+- Gadelha, L., & Narcı, K. (2026). GW-RePO: toward FAIR and resource-aware computational workflows through provenance and observability data. Zenodo. Boosting Biodata Bootcamp, Aachen, Germany. DOI: [10.5281/zenodo.23060657](https://doi.org/10.5281/zenodo.23060657)
 
 # Acknowledgements
 
