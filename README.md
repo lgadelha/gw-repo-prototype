@@ -502,7 +502,19 @@ All settings in `.env`:
 
 **Full documentation**: `doc/README.md`
 
-## AI-assisted development
+# Related publicatons
+
+- Gadelha, L., Heyl, F., Mauer, K., Narcı, K., Hazal Sezer, Z., Behrens, A., Iyappan, A., Kırlı, K. (2025). Toward a Provenance-Aware Observability Framework for Human Genomics Computational Workflows. Proceedings of the ProvenanceWeek 2025, 46–51. DOI: [10.1145/3736229.3736267](https://doi.org/10.1145/3736229.3736267)
+
+
+# Acknowledgements
+
+This work incorporates some of the provenance and resource usage management and visualization from previous work:
+
+- Gadelha, L. M. R., Wilde, M., Mattoso, M., Foster, I. (2012). MTCProv: A practical provenance query framework for many-task scientific computing. Distributed and Parallel Databases, 30(5–6), 351–370. DOI: [10.1007/s10619-012-7104-4](https://doi.org/10.1007/s10619-012-7104-4)
+- Mondelli, M. L., Magalhães, T., Loss, G., Wilde, M., Foster, I., Mattoso, M., Katz, D., Barbosa, H., de Vasconcelos, A. T. R., Ocaña, K., Gadelha, L. M. R. (2018). BioWorkbench: A high-performance framework for managing and analyzing bioinformatics experiments. PeerJ, 6, e5551. DOI: [10.7717/peerj.5551](https://doi.org/10.7717/peerj.5551)
+
+# AI-assisted development
 
 Parts of this codebase were written with AI coding assistants. All 
 contributions were reviewed, tested and are maintained by the 
