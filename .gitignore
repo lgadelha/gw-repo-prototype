@@ -37,3 +37,18 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.bak
+
+# CO2 JSON output
+co2footprint_*.json
+co2footprint_*.txt
+co2footprint_*.html
+
+# Nextflow report
+nf-*reports.tsv
+
+.lineage
+.nextflow
+.streamlit
+results
+work
+doc
