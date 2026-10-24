@@ -1887,30 +1887,31 @@ def get_optimization_recommendations(
 ):
     """
     Get optimization recommendations for a specific module.
-    Combines ML predictions with historical data analysis.
+    Combines ML predictions with historical data analysis. History: the module's
+    completed attempts (as in training), matched by normalized process name; `tasks`
+    lists them with their input size.
     """
     try:
-        # Get historical data for this module (match module name, ignore instance suffix)
-        query_str = """
+        from ml.features import INPUT_MB_SQL
+        query_str = f"""
         SELECT 
             p.peak_rss, p.peak_vmem, p.duration, p.cpus_requested,
             p.percent_cpu, p.percent_memory, p.time_requested, p.memory_requested,
             c.energy_consumption_mwh, c.co2e_mg,
-            p.process_name, p.disk_usage_mb, p.module_name
+            p.process_name, {INPUT_MB_SQL} AS disk_usage_mb,
+            p.workflow_execution_id, p.task_name, p.realtime
         FROM processexecution p
         LEFT JOIN co2footprint c ON p.id = c.process_execution_id
-        WHERE UPPER(p.module_name) LIKE UPPER(:process_name)
+        WHERE p.final_status = 'COMPLETED'
         """
         
         if institute_id:
             query_str += " AND p.institute_id = :institute_id"
         
-        result = session.execute(
-            text(query_str),
-            {"process_name": f"%{process_name}%", "institute_id": institute_id or "UNKNOWN"}
-        )
+        result = session.execute(text(query_str), {"institute_id": institute_id})
         
-        historical_data = [dict(row._mapping) for row in result]
+        historical_data = [dict(row._mapping) for row in result
+                           if extract_module_name(row.process_name) == process_name]
         
         if not historical_data:
             return {
@@ -2013,6 +2014,10 @@ def get_optimization_recommendations(
                 insights.append(f"Memory over-allocated - can reduce by ~{int((1 - mem_recommended/mem_requested)*100)}%")
         
         recommendations['insights'] = insights
+        recommendations['tasks'] = [
+            {k: r[k] for k in ('workflow_execution_id', 'task_name', 'disk_usage_mb', 'peak_rss',
+                               'duration', 'realtime', 'percent_cpu', 'cpus_requested')}
+            for r in historical_data]
         
         return {
             "success": True,
@@ -2076,16 +2081,17 @@ def get_all_optimizations(
         
         all_optimizations = []
         
+        from ml.features import INPUT_MB_SQL
         for module_name in module_names:
             # Get historical data for this module
-            query_str = """
+            query_str = f"""
                 SELECT 
                     p.peak_rss,
                     p.peak_vmem,
                     p.duration,
                     p.cpus_requested,
                     p.percent_cpu,
-                    p.disk_usage_mb,
+                    {INPUT_MB_SQL} AS disk_usage_mb,
                     p.memory_requested,
                     p.time_requested,
                     p.process_name,
@@ -2098,6 +2104,7 @@ def get_all_optimizations(
                 FROM processexecution p
                 WHERE (UPPER(SPLIT_PART(p.process_name, ' (', 1)) LIKE UPPER(:process_name)
                    OR UPPER(SPLIT_PART(p.process_name, ':', -1)) LIKE UPPER(:process_name))
+                  AND p.final_status = 'COMPLETED'
             """
             
             opt_params = {"process_name": f"%{module_name}%"}

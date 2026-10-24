@@ -309,64 +309,21 @@ Two or more runs against a baseline:
   a process, resource use per value across every run (MTCProv's
   `correlate_parameter_runtime`).
 
-#### 3. ML Training
+#### Bayesian modelling
 
-Train resource prediction models here
-
-- Train Gradient Boosting models on your historical data
-- View model performance metrics:
-  - R² score (variance explained)
-  - RMSE (root mean square error)
-  - MAE (mean absolute error)
-  - Cross-validation scores
-- Feature importance rankings (which features matter most)
-- Model artifacts stored in `/code/models/`
-
-**Requirements:** Minimum 10 samples per process for per-process models
-
----
-
-#### 4. ML Predictions
-Get resource recommendations for a specific process before running your new analysis
-- Enter process name (e.g., `BCFTOOLS_FILTER`)
-- Get predictions for SMALL, MEDIUM, LARGE dataset scenarios
-- Predictions include:
-  - Memory (MB) with P95 safety margin
-  - CPU cores with P95 safety margin
-  - Duration (seconds) with P95 safety margin
-- Auto-generated Nextflow config snippet
-- Download ready-to-use config file
-- Shows if prediction uses per-process model or fallback
-
----
-
-#### 5. Optimization
-Get data-driven recommendations for all processes
-
-**Features:**
-- Lists all processes with historical data
-- For each process:
-  - Historical statistics (mean, std, min, max, median, P95, P99)
-  - Recommended configuration (P95-based)
-  - Process insights (CPU-bound, I/O-bound, etc.)
-  - Energy and CO2 analysis (if available)
-  - 3 scenario predictions (SMALL/MEDIUM/LARGE)
-  - `is_fallback_model` flag (true if <10 samples)
-- Filter by institute
-
----
-
-#### 6. Model Performance
-Monitor trained model quality before trusting predictions
-
-- List all trained models (memory, time, CPU per process)
-- Accuracy metrics comparison
-- Feature importance visualizations
-- Training sample counts
-- Model timestamps
-- Delete/retrain individual models
-
----
+Per-process resource predictions (see [ML Resource Prediction](#ml-resource-prediction)),
+in three tabs. **Prediction settings** above them hold the priority (balanced, cost or
+performance safety margins) and the resource limits, which cap every prediction.
+- **Training:** which processes have a model, with their training samples, and **Train
+  models**. A process needs at least 10 completed attempts with an input size (from
+  `lineage-import`). Training replaces all models.
+- **Optimizer:** one process (kept in the URL as `?process=`, shared with Process
+  profile) and an input size. It shows the recommended memory, time and CPUs, each with
+  the model's prediction, 95 % interval and safety margin; charts of the process's past
+  attempts against input size with the prediction marked; and the Nextflow settings to
+  download.
+- **All processes:** the same for every process with a model, at the median or largest
+  input size seen per process, or one size for all, with one combined config to download.
 
 ## RO-Crate export
 
@@ -430,6 +387,8 @@ and versions for the processes, the crate's author and publisher.
 - Per-process models with automatic regularization
 
 **Training:**
+- Completed attempts only (failed and killed attempts have cut-off peaks; cached ones
+  repeat an earlier launch's task), and only those with an input size from `lineage-import`
 - Scenario-based priors:
   - ≥30 runs: weak priors (data-driven)
   - 10-30 runs: moderate priors
@@ -452,7 +411,7 @@ and versions for the processes, the crate's author and publisher.
 | Feature | Description | Why It Matters |
 |---------|-------------|----------------|
 | `has_module` | 1 if process has module prefix | Distinguishes tool vs custom script |
-| `disk_intensity` | Disk usage in MB | Direct measure of data size |
+| `disk_intensity` | Task input size in MB (its input files, from `lineage-import`) | Direct measure of data size |
 | `disk_io_total` | Read + write bytes (MB) | I/O volume affects runtime |
 | `disk_io_ratio` | Read/write ratio | Read-heavy vs write-heavy patterns |
 | `cpu_utilization` | CPU % / 100 | How much CPU the process uses |
@@ -474,13 +433,12 @@ and versions for the processes, the crate's author and publisher.
 **Each process gets its own model** trained only on its historical data:
 - Automatically uses normalized process names (e.g., `BCFTOOLS_FILTER`)
 - Aggregates runs from all variants (`_1`, `_2`, etc.)
-- Strong priors for processes with <10 samples prevent overfitting
-- No fallback model needed - Bayesian priors handle low-sample cases
+- Processes with fewer than 10 usable samples get no model
 
 **How it works:**
 ```
 BCFTOOLS_FILTER has 24 samples? → Train BCFTOOLS_FILTER model ✅
-BCFTOOLS_FILTER has 3 samples?  → Strong priors, still train ✅
+BCFTOOLS_FILTER has 3 samples?  → No model ❌
 ```
 
 ### Resource Limits
@@ -493,8 +451,7 @@ BCFTOOLS_FILTER has 3 samples?  → Strong priors, still train ✅
 **Enforcement:**
 - Applied as hard caps on all predictions
 - Prevents absurd extrapolation (e.g., 816 CPUs, 11 TB memory)
-- Configurable per workflow in ML Training tab
-- Optional override per prediction in Optimizations tab
+- Set under **Prediction settings** on the Bayesian modelling page
 
 ## API Endpoints
 

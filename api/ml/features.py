@@ -9,10 +9,20 @@ from typing import List, Dict, Optional
 from sqlmodel import Session, select
 from datetime import datetime, timezone
 
+from nfcore_modules import normalize_module_name
+
+# A task's input size in MB: the sum of its input files' sizes, from lineage-import.
+# Selected as `disk_usage_mb`, the name the features below use; the processexecution
+# column of that name is never filled.
+INPUT_MB_SQL = ("(SELECT sum(i.size_bytes) FROM processexecutioninputfile i "
+                "WHERE i.process_execution_id = p.id)::float8 / 1e6")
+
 
 def extract_process_features(session: Session) -> pd.DataFrame:
     """
-    Extract features from process execution data for ML training.
+    Extract features from process execution data for ML training: completed
+    attempts only (failed and killed ones have cut-off peaks; cached ones repeat a
+    task an earlier launch ran), with `module_name` normalized from process_name.
     
     Features include:
     - Process name
@@ -23,7 +33,7 @@ def extract_process_features(session: Session) -> pd.DataFrame:
     """
     
     # Build query for process executions
-    query = """
+    query = f"""
     SELECT 
         p.id,
         p.process_name,
@@ -41,7 +51,7 @@ def extract_process_features(session: Session) -> pd.DataFrame:
         p.read_char,
         p.write_char,
         p.duration,
-        p.disk_usage_mb,
+        {INPUT_MB_SQL} AS disk_usage_mb,
         p.read_bytes,
         p.write_bytes,
         p.peak_vmem_mb,
@@ -50,6 +60,7 @@ def extract_process_features(session: Session) -> pd.DataFrame:
         w.nextflow_version
     FROM processexecution p
     LEFT JOIN workflowexecution w ON p.workflow_execution_id = w.id
+    WHERE p.final_status = 'COMPLETED'
     """
 
     
@@ -58,6 +69,7 @@ def extract_process_features(session: Session) -> pd.DataFrame:
     
     if df.empty:
         return df
+    df['module_name'] = df['process_name'].apply(normalize_module_name)
     
     # ==================== Feature Engineering ====================
     
@@ -77,9 +89,7 @@ def extract_process_features(session: Session) -> pd.DataFrame:
     df['memory_utilization'] = df['percent_memory'] / 100.0
     
     # Memory efficiency (actual vs requested)
-    df['memory_requested_mb'] = df['memory_requested'].apply(
-        lambda x: x / 1024 if pd.notna(x) and x > 1000 else x
-    )
+    df['memory_requested_mb'] = df['memory_requested']  # stored in MiB
     df['memory_efficiency'] = df['peak_rss'] / df['memory_requested_mb'].replace(0, np.nan)
     
     # Time efficiency

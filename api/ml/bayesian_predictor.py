@@ -90,8 +90,10 @@ class BayesianResourcePredictor:
         y_time = historical_data['duration'].values.astype(float)
         y_cpu = (historical_data['percent_cpu'].values / 100.0).astype(float)  # Normalize to 0-1
         
-        # Remove rows with invalid targets
+        # Remove rows with invalid targets, and rows with missing features (tasks
+        # without an input size: their run had no lineage-import)
         valid_mask = (
+            (~np.isnan(X.astype(float)).any(axis=1)) &
             (y_memory > 0) & 
             (y_time > 0) & 
             (~np.isnan(y_memory)) & 
@@ -115,7 +117,6 @@ class BayesianResourcePredictor:
         
         # Train models for each resource
         models = {}
-        scalers = {}
         
         for resource_type, y in [
             ('memory', y_memory_valid),
@@ -126,11 +127,9 @@ class BayesianResourcePredictor:
             model.fit(X_scaled, y)
             models[resource_type] = model
         
-        scalers = {resource_type: scaler for resource_type in ['memory', 'time', 'cpu']}
-        
-        # Store models
+        # Store models (one scaler for all three, as load_model and predict expect)
         self.models[process_name] = models
-        self.scalers[process_name] = scalers
+        self.scalers[process_name] = scaler
         
         # Save to disk
         for resource_type, model in models.items():
