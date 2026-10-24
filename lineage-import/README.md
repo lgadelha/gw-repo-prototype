@@ -69,6 +69,21 @@ Files under an *ordinary* (non-scratch) work dir are safe to read post-run in ev
 other case: Nextflow never deletes `work/` on error/abort, and only deletes it on
 success if `cleanup = true` is explicitly set in `nextflow.config`.
 
+## Run it before the directories are reused
+
+The script hashes the files as they are when it runs. If a later run in the same
+launch directory overwrites `results/`, or `work/` is cleaned, the earlier run's
+files are gone or no longer its own.
+- **Published outputs:** each one is checked against its lineage record: a file by
+  size and modification time, a directory by whether any file under it is newer than
+  the record. One that changed since the run published it is posted with `sha256`
+  null, not with another run's hash.
+- **Task files:** an unreadable file is posted with `sha256` null.
+- **Stored hashes are kept:** the API never replaces a stored hash with null, so
+  re-importing an old run after `work/` was cleaned leaves the hashes of its first
+  import in place. A wrong hash, though, can't be cleared by re-importing; delete the
+  row instead.
+
 ## Requirements
 
 Python 3 standard library only (`urllib`, `json`, `argparse`, `hashlib`). No
@@ -93,6 +108,18 @@ Python 3 standard library only (`urllib`, `json`, `argparse`, `hashlib`). No
 
   `parameter_value` holds the text form (booleans as `true`/`false`, lists as JSON);
   numbers are also in `value_num`. Null values are skipped.
+- `POST /workflows/{id}/outputs/` — one `WorkflowOutputFile` row per file or directory
+  the run published (`publishDir`), read back with `GET /workflows/{id}/outputs/`:
+  the published path, its `sha256` and `size_bytes`, the task that produced it
+  (`source_process_execution_id`) and its path in that task's work dir
+  (`source_filename`). The RO-Crate export lists them as the run's `result`.
+  - They come from nf-lineage's `FileOutput` records of the run's last launch
+    (`-resume` launches share the workflow id). Lineage records a published file
+    only if it lands inside the run's `outputDir`, which defaults to `results`. If a
+    pipeline publishes elsewhere (e.g. `--outdir /data/out`), set
+    `outputDir = params.outdir` in the config.
+  - Nextflow's own reports (`pipeline_info/execution_*`, the DAG, the params JSON)
+    aren't recorded by lineage, so they aren't imported.
 
 How `sha256` is computed:
 - **Remote inputs** (`https://…`, including pipeline assets nf-lineage records as
@@ -104,4 +131,5 @@ How `sha256` is computed:
   sum of its files' sizes.
 - Hashes are cached by real path, so a file or directory used by many tasks (or
   inside an already-hashed directory) is read once per run.
-- A path that still can't be read is posted with `sha256` null rather than dropped.
+- A path that still can't be read is posted with `sha256` null rather than dropped
+  (an already stored hash is kept; see above).

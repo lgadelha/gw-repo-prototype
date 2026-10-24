@@ -5,18 +5,24 @@ per-process table, right-sizing, retries, parameters and versions."""
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import requests
 import streamlit as st
 
 import provgraph as pg
 import runprofile as prof
-from common import api_get, fmt_duration, fmt_mb, page_header, kpi, empty_state
+from common import API_BASE_URL, api_get, api_key, fmt_duration, fmt_mb, page_header, kpi, empty_state
 
 MAX_LABELLED_TASKS = 60
 
 
 def render(run: pd.Series):
     page_header("Run detail", run)
-    st.caption(f"Workflow ID `{run['id']}` · pipeline {run['pipeline']}")
+    info, download = st.columns([4, 1], vertical_alignment="center")
+    info.caption(f"Workflow ID `{run['id']}` · pipeline {run['pipeline']}")
+    download.download_button("RO-Crate", _crate_fetcher(run['id']), file_name="ro-crate-metadata.json",
+                             mime="application/ld+json", icon=":material/download:", on_click="ignore",
+                             width="stretch", help="The run's provenance as a Workflow Run RO-Crate "
+                             "(metadata only), from the API's /workflows/{id}/ro-crate")
 
     rows = api_get(f"/workflows/{run['id']}/task_profile")
     if rows is None:
@@ -47,6 +53,18 @@ def render(run: pd.Series):
         _retries(tasks, logical)
     with params:
         _params_and_versions(run)
+
+
+def _crate_fetcher(run_id):
+    """Fetches the run's RO-Crate when the button is clicked. Streamlit calls it on a
+    separate thread, so it takes the URL and API key now, not from session state."""
+    url, key = f"{API_BASE_URL}/workflows/{run_id}/ro-crate", api_key()
+
+    def fetch():
+        response = requests.get(url, headers={"Authorization": f"Bearer {key}"}, timeout=60)
+        response.raise_for_status()
+        return response.content
+    return fetch
 
 
 def _kpis(run, tasks, critical):

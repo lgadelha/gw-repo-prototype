@@ -17,6 +17,8 @@ from models import (
     Samplemetric,
     Workflowannotation
 )
+from fastapi.responses import JSONResponse
+from rocrate_export import build_crate
 import json
 import numpy as np
 
@@ -96,6 +98,15 @@ class ProcessExecutionOutputFile(SQLModel, table=True):
     size_bytes: Optional[int] = Field(default=None, sa_type=BigInteger)  # directories: sum of their files
 
     process_execution: Optional["ProcessExecution"] = Relationship(back_populates="output_files")
+
+class WorkflowOutputFile(SQLModel, table=True):
+    """A file or directory the run published (publishDir), from the lineage store via lineage-import."""
+    workflow_execution_id: str = Field(foreign_key="workflowexecution.id", primary_key=True)
+    filename: str = Field(primary_key=True)  # the published path
+    sha256: Optional[str] = None
+    size_bytes: Optional[int] = Field(default=None, sa_type=BigInteger)  # directories: sum of their files
+    source_process_execution_id: Optional[str] = Field(default=None, foreign_key="processexecution.id")  # the task that made it
+    source_filename: Optional[str] = None  # its path in that task's work dir
 
 class WorkflowExecution(SQLModel, table=True):
     id: str = Field(primary_key=True)
@@ -398,6 +409,25 @@ def get_workflow_parameters(workflow_id: str, session: Session = Depends(get_ses
     WHERE p.workflow_execution_id = :workflow_id
     """
     return [dict(r._mapping) for r in session.execute(text(query), {"workflow_id": workflow_id})]
+
+@app.get("/workflows/{workflow_id}/ro-crate")
+def get_workflow_ro_crate(workflow_id: str, request: Request, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
+    """The run as a detached Workflow Run RO-Crate (ro-crate-metadata.json); see
+    rocrate_export.py. Its root id is the run's URL under API_BASE_URL (the public
+    address in .env; the UI container's own value, http://api, is internal), or
+    under this request's base URL when that isn't set."""
+    workflow = session.get(WorkflowExecution, workflow_id)
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    annotations = session.exec(select(Workflowannotation).where(Workflowannotation.workflow_execution_id == workflow_id)).all()
+    base = os.getenv("API_BASE_URL") or str(request.base_url)
+    tasks = session.exec(select(ProcessExecution).where(ProcessExecution.workflow_execution_id == workflow_id)).all()
+    outputs = get_workflow_outputs(workflow_id, session, api_key)
+    crate = build_crate(workflow.model_dump(), [a.model_dump() for a in annotations],
+                        f"{base.rstrip('/')}/workflows/{workflow_id}/", [t.model_dump() for t in tasks],
+                        get_workflow_files(workflow_id, session, api_key), [o.model_dump() for o in outputs])
+    return JSONResponse(crate, media_type="application/ld+json",
+                        headers={"Content-Disposition": 'attachment; filename="ro-crate-metadata.json"'})
 
 @app.get("/workflows/{execution_id}", response_model=WorkflowExecution)
 def get_workflow(execution_id: str, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
@@ -805,9 +835,20 @@ def delete_parameters(process_id: str, session: Session = Depends(get_session), 
     session.commit()
     return {"message": "Parameters deleted successfully"}
 
+def _keep_stored_hash(row, session: Session):
+    """A file row posted without sha256 (lineage-import couldn't read the file, e.g.
+    `work/` was cleaned or `results/` overwritten since an earlier import) keeps the
+    hash and size already stored, instead of the upsert erasing them."""
+    if row.sha256 is None:
+        key = tuple(getattr(row, c.name) for c in type(row).__table__.primary_key.columns)
+        stored = session.get(type(row), key)
+        if stored and stored.sha256:
+            row.sha256, row.size_bytes = stored.sha256, stored.size_bytes
+    return row
+
 @app.post("/input_files/", response_model=ProcessExecutionInputFile)
 def create_input_file(file: ProcessExecutionInputFile, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
-    db_obj = session.merge(file)
+    db_obj = session.merge(_keep_stored_hash(file, session))
     session.commit()
     session.refresh(db_obj)
     return db_obj
@@ -827,7 +868,7 @@ def delete_input_files(process_id: str, session: Session = Depends(get_session),
 
 @app.post("/output_files/", response_model=ProcessExecutionOutputFile)
 def create_output_file(file: ProcessExecutionOutputFile, session: Session = Depends(get_session), api_key: str = Depends(verify_api_key)):
-    db_obj = session.merge(file)
+    db_obj = session.merge(_keep_stored_hash(file, session))
     session.commit()
     session.refresh(db_obj)
     return db_obj
@@ -1121,6 +1162,34 @@ def get_sample_metrics(
     if sample:
         query = query.where(Samplemetric.sample == sample)
     return session.exec(query).all()
+
+
+@app.post("/workflows/{workflow_id}/outputs/", response_model=WorkflowOutputFile)
+def create_workflow_output(
+    workflow_id: str,
+    output: WorkflowOutputFile,
+    session: Session = Depends(get_session),
+    api_key: str = Depends(verify_api_key)
+):
+    """Submit one published output of a workflow (lineage-import)."""
+    workflow = session.get(WorkflowExecution, workflow_id)
+    if not workflow:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    output.workflow_execution_id = workflow_id
+    db_obj = session.merge(_keep_stored_hash(output, session))
+    session.commit()
+    session.refresh(db_obj)
+    return db_obj
+
+@app.get("/workflows/{workflow_id}/outputs/", response_model=List[WorkflowOutputFile])
+def get_workflow_outputs(
+    workflow_id: str,
+    session: Session = Depends(get_session),
+    api_key: str = Depends(verify_api_key)
+):
+    """The files and directories a workflow published."""
+    return session.exec(select(WorkflowOutputFile).where(WorkflowOutputFile.workflow_execution_id == workflow_id)).all()
 
 
 @app.post("/workflows/{workflow_id}/annotations/", response_model=Workflowannotation)

@@ -9,7 +9,9 @@ murmur3(path + size + mtime), not content -- see doc/step0b-tower-lineage-wire-f
 section 4), and POSTs `ProcessExecutionInputFile` / `ProcessExecutionOutputFile` rows
 to the GW-RePO API, matching the ProcessExecution rows the tower-emulation endpoints
 (api/main.py) already created during the run. Also POSTs each task's `val` inputs
-and task globals (e.g. `task.ext.args`) as ProcessExecutionParameterInput rows.
+and task globals (e.g. `task.ext.args`) as ProcessExecutionParameterInput rows,
+and the files the run published (publishDir) as WorkflowOutputFile rows, each with
+the task that produced it.
 
 Usage:
     python lineage-import/submit_lineage.py [--run-dir .]
@@ -35,9 +37,11 @@ import glob
 import hashlib
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 
@@ -212,6 +216,63 @@ def local_copy(path, work_dir):
     return str(direct)
 
 
+def workflow_run_hash(lineage_dir, workflow_id):
+    """The lineage hash of the run's last launch. .lineage/.history/ has one file
+    per launch (timestamp, runName, sessionId, runLid); -resume launches share the
+    sessionId, which is GW-RePO's workflow id, and GW-RePO's row describes the last."""
+    launches = []
+    for path in (lineage_dir / ".history").glob("*"):
+        cols = path.read_text(encoding="utf-8").strip().split("\t")
+        if len(cols) > 3 and cols[2] == workflow_id and cols[3].startswith("lid://"):
+            launches.append((cols[0], cols[3][len("lid://"):]))
+    return max(launches)[1] if launches else None
+
+
+def published_outputs(lineage_dir, run_hash):
+    """(published path, producing task hash, path in that task's work dir, record
+    spec) for each file or directory the run published. Lineage records these as FileOutput records
+    under <run hash>/<path in the output dir>, with no taskRun and a `source` of
+    lid://<task hash>/<name>. Files outside the run's `outputDir` (default `results`)
+    and Nextflow's own reports (pipeline_info/execution_*) are not recorded."""
+    outputs = []
+    for path in sorted((lineage_dir / run_hash).rglob(".data.json")):
+        record = json.loads(path.read_text(encoding="utf-8"))
+        spec = record.get("spec") or {}
+        if record.get("kind") != "FileOutput" or spec.get("taskRun"):
+            continue
+        source = spec.get("source") or ""
+        task_hash = source_path = None
+        if source.startswith("lid://"):
+            key = source[len("lid://"):]
+            task_hash = key.split("/", 1)[0]
+            source_record = _lineage_record(lineage_dir, key)
+            if source_record and source_record.get("kind") == "FileOutput":
+                source_path = _strip_file_uri(source_record["spec"]["path"])
+        outputs.append((_strip_file_uri(spec["path"]), task_hash, source_path, spec))
+    return outputs
+
+
+def changed_since_published(path, spec):
+    """True if a published file or directory changed after this run published it,
+    e.g. a later run wrote to the same output directory: its content is then no
+    longer this run's. A file is compared by size and modification time with its
+    lineage record; a directory (whose own mtime doesn't change when files in it are
+    rewritten) by whether any file under it is newer than the record."""
+    if not os.path.exists(path):
+        return False
+    # Trim nanoseconds to microseconds, which fromisoformat accepts on every Python 3.
+    stamp = re.sub(r"(\.\d{6})\d+", r"\1", spec.get("modifiedAt") or "")
+    try:
+        published = datetime.fromisoformat(stamp).timestamp()
+    except ValueError:
+        return False
+    if os.path.isdir(path):
+        return any(os.stat(os.path.join(root, name)).st_mtime >= published + 1
+                   for root, _, names in os.walk(path) for name in names)
+    st = os.stat(path)
+    return st.st_size != spec.get("size") or abs(st.st_mtime - published) >= 1
+
+
 # --- hashing -----------------------------------------------------------------
 
 _hash_cache = {}
@@ -340,8 +401,37 @@ def main():
                 print(f"  ! POST /parameters/ for {process_id} ({name}) -> {code} {msg}")
                 failed += 1
 
+    run_hash = workflow_run_hash(lineage_dir, workflow_id)
+    if not run_hash:
+        print(f"  ! no launch of {workflow_id} in {lineage_dir}/.history -- published outputs skipped")
+    task_ids = {proc["id"] for proc in processes}
+    outputs_posted = 0
+    for path, task_hash, source_path, spec in published_outputs(lineage_dir, run_hash) if run_hash else []:
+        if changed_since_published(path, spec):
+            print(f"    ! {path} changed since this run published it -- recorded without sha256")
+            sha256, size_bytes = None, None
+        else:
+            # A copy is read again; a symlink to the work dir hits the cache.
+            sha256, size_bytes = hash_and_size(path)
+        if sha256 is None:
+            unhashed += 1
+        source_id = f"{workflow_id}_{task_hash}" if task_hash else None
+        if args.dry_run:
+            print(f"  output {path} {sha256} {size_bytes} <- {source_id} {source_path}")
+            outputs_posted += 1
+            continue
+        row = {"filename": path, "sha256": sha256, "size_bytes": size_bytes,
+               "source_process_execution_id": source_id if source_id in task_ids else None,
+               "source_filename": source_path}
+        code, msg = post(args.endpoint, f"/workflows/{workflow_id}/outputs/", api_key, row)
+        if code and code < 300:
+            outputs_posted += 1
+        else:
+            print(f"  ! POST /workflows/{workflow_id}/outputs/ ({path}) -> {code} {msg}")
+            failed += 1
+
     print(f"done: {posted} file rows ({unhashed} without sha256), {params_posted} parameter rows, "
-          f"{skipped} tasks skipped, {failed} failed")
+          f"{outputs_posted} published outputs, {skipped} tasks skipped, {failed} failed")
     sys.exit(1 if failed else 0)
 
 

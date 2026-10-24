@@ -249,6 +249,8 @@ The profile of the selected run:
 - **Parameters & versions:** repository, revision, commit, profile, Nextflow version,
   script and config hashes, annotations, and pipeline params. The nf-core `genomes`
   catalog is hidden unless switched on.
+- **RO-Crate** (button next to the workflow id): downloads the run's provenance as
+  `ro-crate-metadata.json`; see [RO-Crate export](#ro-crate-export).
 
 #### Provenance
 
@@ -365,6 +367,54 @@ Monitor trained model quality before trusting predictions
 - Delete/retrain individual models
 
 ---
+
+## RO-Crate export
+
+`GET /workflows/{id}/ro-crate` returns a stored run as a
+[Workflow Run RO-Crate](https://w3id.org/ro/wfrun/provenance/0.5): a detached,
+metadata-only `ro-crate-metadata.json` (files are described, not included) that follows
+the Provenance Run Crate profile 0.5 on RO-Crate 1.1. The Run detail page downloads the
+same file.
+
+```bash
+curl -H "Authorization: Bearer $API_KEY" http://localhost/workflows/<id>/ro-crate -o ro-crate-metadata.json
+```
+
+What the crate holds:
+- **The run:** the pipeline as the main workflow (its `main.nf` at the run's commit on
+  GitHub), the Nextflow version, the institute as agent, the `params.*` as parameter
+  values, and the other annotations (e.g. `campaign`) as `additionalProperty` and root
+  `keywords`. The root id is the run's URL under `API_BASE_URL`; licence CC-BY-4.0.
+- **Tasks:** one tool and step per process, one action per attempt that ran (completed or
+  failed, with its exit code), with its input and output files and 12 resource values
+  from the trace (realtime, %CPU, %memory, peak RSS and VMEM, I/O, the requested CPUs,
+  memory and time), each with a QUDT unit.
+- **Files:** one entity per path, with size, `encodingFormat` and the SHA-256 as
+  `identifier` (`sha256:<hex>`). Local paths become `#` ids relative to the launch
+  directory (`#work/ab/…/x.bam`, `#results/…`), so no absolute local path is exposed;
+  remote inputs keep their URL. The run's inputs are the files its tasks read that no
+  task of the run wrote.
+- **Published outputs** (from `lineage-import`): the run's `result`, each with
+  `isBasedOn` → the task output it was copied from.
+
+Left out:
+- cached tasks (reused from an earlier launch) and tasks that never finished, counted in
+  the crate's description; files of cached tasks, so their published copies have no
+  `isBasedOn`;
+- energy and CO2e, until a shared vocabulary for them exists (see `PERSPECTIVES.md`);
+- Nextflow's own reports (`pipeline_info/execution_*`), which lineage doesn't record.
+
+Parameter values can still hold local paths (e.g. a pipeline asset under `~/.nextflow`).
+
+To validate a crate (Python ≥ 3.10):
+```bash
+pip install roc-validator runcrate
+rocrate-validator validate -p provenance-run-crate-0.5 --packaging-mode detached ro-crate-metadata.json
+mkdir crate && mv ro-crate-metadata.json crate/ && runcrate report crate   # task actions with inputs and outputs
+```
+The six nf-core/rnaseq test runs pass at the required level. Remaining recommended-level
+warnings are about data GW-RePO doesn't have: MIME types for formats like BAM, web ids
+and versions for the processes, the crate's author and publisher.
 
 ## ML Resource Prediction
 
@@ -496,7 +546,7 @@ rm .env
 All settings in `.env`:
 - `API_KEY`: Authentication
 - `DATABASE_URL`: PostgreSQL connection
-- `API_BASE_URL`: API endpoint
+- `API_BASE_URL`: API endpoint, as clients reach it; also the base of the run URLs in RO-Crate exports
 
 ---
 
