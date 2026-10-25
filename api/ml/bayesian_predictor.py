@@ -5,6 +5,7 @@ Uses SAME process name normalization as existing code.
 
 from sklearn.linear_model import BayesianRidge
 from sklearn.preprocessing import StandardScaler
+from scipy.stats import norm
 import pandas as pd
 import numpy as np
 import joblib
@@ -29,23 +30,12 @@ class BayesianResourcePredictor:
         # Per-process scalers
         self.scalers: Dict[str, Dict[str, StandardScaler]] = {}
         
-        # Feature columns - enhanced for better CPU scaling
+        # Feature columns: only what is known before a task runs. Features derived
+        # from the task's own peak RSS, CPU use, duration or I/O leak the targets.
         self.feature_cols = [
-            'disk_intensity',
-            'cpu_utilization',
-            'memory_utilization',
-            'io_total',
-            'io_ratio',
-            'cpu_mem_product',
-            'memory_per_gb',
-            'time_per_gb',
-            'cpu_per_gb',
-            'size_category_encoded',
-            # New features for better CPU scaling
-            'log_disk_gb',              # Log-scaled data size (diminishing returns)
-            'disk_cpu_interaction',     # Explicit CPU-data size scaling
-            'io_per_cpu',               # I/O pressure per core
-            'memory_cpu_ratio'          # Resource balance
+            'disk_intensity',           # Task input size (MB)
+            'log_disk_gb',              # Log-scaled input size (diminishing returns)
+            'log_cpus',                 # Log of the CPUs requested (time falls with more)
         ]
     
     def train(self, process_name: str, historical_data: pd.DataFrame) -> Dict:
@@ -88,7 +78,6 @@ class BayesianResourcePredictor:
         X = historical_data[self.feature_cols].values
         y_memory = historical_data['peak_rss_mb'].values.astype(float)
         y_time = historical_data['duration'].values.astype(float)
-        y_cpu = (historical_data['percent_cpu'].values / 100.0).astype(float)  # Normalize to 0-1
         
         # Remove rows with invalid targets, and rows with missing features (tasks
         # without an input size: their run had no lineage-import)
@@ -97,13 +86,11 @@ class BayesianResourcePredictor:
             (y_memory > 0) & 
             (y_time > 0) & 
             (~np.isnan(y_memory)) & 
-            (~np.isnan(y_time)) & 
-            (~np.isnan(y_cpu))
+            (~np.isnan(y_time))
         )
         X_valid = X[valid_mask]
         y_memory_valid = y_memory[valid_mask]
         y_time_valid = y_time[valid_mask]
-        y_cpu_valid = y_cpu[valid_mask]
         
         if len(X_valid) < 10:
             return {
@@ -120,8 +107,7 @@ class BayesianResourcePredictor:
         
         for resource_type, y in [
             ('memory', y_memory_valid),
-            ('time', y_time_valid),
-            ('cpu', y_cpu_valid)
+            ('time', y_time_valid)
         ]:
             model = BayesianRidge(**model_params)
             model.fit(X_scaled, y)
@@ -152,7 +138,6 @@ class BayesianResourcePredictor:
         model_files = {
             'memory': self.model_dir / f"{process_name}_memory_bayesian.pkl",
             'time': self.model_dir / f"{process_name}_time_bayesian.pkl",
-            'cpu': self.model_dir / f"{process_name}_cpu_bayesian.pkl",
             'scaler': self.model_dir / f"{process_name}_scaler_bayesian.pkl"
         }
         
@@ -161,20 +146,26 @@ class BayesianResourcePredictor:
         
         self.models[process_name] = {
             'memory': joblib.load(model_files['memory']),
-            'time': joblib.load(model_files['time']),
-            'cpu': joblib.load(model_files['cpu'])
+            'time': joblib.load(model_files['time'])
         }
         self.scalers[process_name] = joblib.load(model_files['scaler'])
         
+        # Models trained with another feature set need retraining
+        if getattr(self.scalers[process_name], 'n_features_in_', None) != len(self.feature_cols):
+            del self.models[process_name], self.scalers[process_name]
+            return False
         return True
     
-    def predict(self, process_name: str, features: dict) -> dict:
+    def predict(self, process_name: str, features: dict, quantile: float = 0.95) -> dict:
         """
-        Predict with uncertainty estimates.
+        Predict with uncertainty estimates. The recommended setting is the given
+        quantile of the predictive distribution, so about 1 - quantile of tasks of
+        this size would need more.
         
         Args:
             process_name: Normalized process name
             features: Dictionary with feature values
+            quantile: Quantile of the predictive distribution to recommend
         
         Returns:
         {
@@ -183,12 +174,12 @@ class BayesianResourcePredictor:
                 'uncertainty': 245,  # std dev
                 'cv': 0.12,  # coefficient of variation
                 'confidence_interval': {'lower': 1568, 'upper': 2528, 'confidence': 0.95},
-                'safety_margin': 0.10,
-                'final_with_safety': 2253
+                'quantile': 0.95,
+                'final_with_safety': 2451  # the quantile of the predictive distribution
             },
-            'time': {...},
-            'cpu': {...}
+            'time': {...}
         }
+        CPUs come from cpu_setting, not a model.
         """
         if process_name not in self.models:
             if not self.load_model(process_name):
@@ -201,7 +192,7 @@ class BayesianResourcePredictor:
         
         predictions = {}
         
-        for resource_type in ['memory', 'time', 'cpu']:
+        for resource_type in ['memory', 'time']:
             model = self.models[process_name][resource_type]
             
             # Bayesian prediction with uncertainty
@@ -210,27 +201,14 @@ class BayesianResourcePredictor:
             # Coefficient of variation (uncertainty metric)
             cv = std[0] / abs(pred[0]) if pred[0] != 0 else 1.0
             
-            # Dynamic safety margin based on uncertainty
-            if cv < 0.1:
-                safety_margin = 0.05  # High confidence: 5%
-            elif cv < 0.2:
-                safety_margin = 0.15  # Medium confidence: 15%
-            else:
-                safety_margin = 0.30  # Low confidence: 30%
+            # Recommended setting: the quantile of the predictive distribution
+            z = norm.ppf(quantile)
             
-            # For CPU, ensure minimum 1 core (CPUs cannot be 0 or negative)
-            if resource_type == 'cpu':
-                # Ensure raw prediction is at least 1 core
-                pred_value = max(1.0, pred[0])
-                ci_lower = max(1.0, pred_value - 1.96 * std[0])
-                ci_upper = max(1.0, pred_value + 1.96 * std[0])
-                pred_with_safety = max(1, round(pred_value * (1 + safety_margin)))
-            else:
-                # Ensure non-negative predictions (memory/time cannot be negative)
-                pred_value = max(0.0, pred[0])
-                ci_lower = max(0, pred_value - 1.96 * std[0])
-                ci_upper = pred_value + 1.96 * std[0]
-                pred_with_safety = max(0, pred_value * (1 + safety_margin))
+            # Ensure non-negative predictions (memory/time cannot be negative)
+            pred_value = max(0.0, pred[0])
+            ci_lower = max(0, pred_value - 1.96 * std[0])
+            ci_upper = pred_value + 1.96 * std[0]
+            pred_with_safety = max(0, pred_value + z * std[0])
             
             predictions[resource_type] = {
                 'prediction': float(pred_value),
@@ -241,7 +219,7 @@ class BayesianResourcePredictor:
                     'upper': float(ci_upper),
                     'confidence': 0.95
                 },
-                'safety_margin': safety_margin,
+                'quantile': quantile,
                 'final_with_safety': float(pred_with_safety)
             }
         
@@ -311,3 +289,72 @@ class BayesianResourcePredictor:
                 }
         
         return results
+
+
+def size_spread(sizes: pd.Series) -> float:
+    """(p90 - p10) / median of input sizes: below 0.2 they barely vary, too little to
+    fit how usage grows with size."""
+    sizes = sizes.dropna()
+    if sizes.empty:
+        return 0.0
+    return float((sizes.quantile(0.9) - sizes.quantile(0.1)) / max(sizes.median(), 0.001))
+
+
+def history_predictions(df: pd.DataFrame, quantile: float = 0.95) -> dict:
+    """
+    Settings from a process's past usage, without a size model: the given quantile
+    of its completed attempts' peak RSS and duration, and cpu_setting. Same shape as
+    BayesianResourcePredictor.predict; 'prediction' is the median and the interval
+    the 2.5-97.5 % range of past use.
+    """
+    predictions = {}
+    for resource_type, values in [('memory', df['peak_rss_mb']),
+                                  ('time', df['duration'])]:
+        predictions[resource_type] = _usage_quantile(values, quantile, resource_type)
+    predictions['cpu'] = cpu_setting(df, quantile)
+    return predictions
+
+
+def cpu_setting(df: pd.DataFrame, quantile: float = 0.95) -> dict:
+    """
+    CPUs for a process from its completed attempts: the given quantile of the CPUs
+    they used, rounded up, but no more than the most they requested. Usage can't
+    exceed the request, so when it reached it (quantile of used / requested ≥ 0.9)
+    `capped_by_request` says the process might use more if given more; not for a
+    request of 1 CPU, which single-threaded tools fill anyway.
+    """
+    setting = _usage_quantile(df['percent_cpu'] / 100.0, quantile, 'cpu')
+    used = setting['final_with_safety']
+    requested = pd.to_numeric(df['cpus_requested'], errors='coerce')
+    requested = requested[requested > 0]
+    cpus = int(np.ceil(used))
+    if not requested.empty:
+        cpus = min(cpus, int(requested.max()))
+        ratio = (pd.to_numeric(df['percent_cpu'], errors='coerce') / 100.0 / df['cpus_requested']).dropna()
+        setting['capped_by_request'] = bool(requested.max() > 1 and not ratio.empty
+                                            and ratio.quantile(quantile) >= 0.9)
+        setting['requested'] = int(requested.max())
+    setting['final_with_safety'] = float(max(1, cpus))
+    return setting
+
+
+def _usage_quantile(values: pd.Series, quantile: float, resource_type: str) -> dict:
+    """The quantile of positive past usage, with its median and 2.5-97.5 % range."""
+    values = pd.to_numeric(values, errors='coerce').dropna()
+    values = values[values > 0]
+    if values.empty:
+        raise ValueError(f"No recorded {resource_type} usage")
+    mean, std = float(values.mean()), float(values.std(ddof=0))
+    return {
+        'prediction': float(values.median()),
+        'uncertainty': std,
+        'cv': std / mean if mean else 1.0,
+        'confidence_interval': {
+            'lower': float(values.quantile(0.025)),
+            'upper': float(values.quantile(0.975)),
+            'confidence': 0.95
+        },
+        'quantile': quantile,
+        'final_with_safety': float(values.quantile(quantile)),
+        'samples': int(len(values))
+    }

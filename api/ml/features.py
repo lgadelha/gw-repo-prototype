@@ -11,11 +11,17 @@ from datetime import datetime, timezone
 
 from nfcore_modules import normalize_module_name
 
-# A task's input size in MB: the sum of its input files' sizes, from lineage-import.
-# Selected as `disk_usage_mb`, the name the features below use; the processexecution
-# column of that name is never filled.
+# A task's input size in MB: the sum of its sample input files' sizes, from
+# lineage-import. Reference files (genome, index, annotation) don't count: an input is
+# one when a task of the same process with another task name (another sample, so not
+# a retry or a resumed copy) has the same file, by path or SHA-256. Selected as `disk_usage_mb`, the name the features below use; the
+# processexecution column of that name is never filled.
 INPUT_MB_SQL = ("(SELECT sum(i.size_bytes) FROM processexecutioninputfile i "
-                "WHERE i.process_execution_id = p.id)::float8 / 1e6")
+                "WHERE i.process_execution_id = p.id AND NOT EXISTS ("
+                "SELECT 1 FROM processexecutioninputfile j "
+                "JOIN processexecution q ON q.id = j.process_execution_id "
+                "WHERE q.process_name = p.process_name AND q.task_name <> p.task_name "
+                "AND (j.filename = i.filename OR j.sha256 = i.sha256)))::float8 / 1e6")
 
 
 def extract_process_features(session: Session) -> pd.DataFrame:
@@ -113,6 +119,9 @@ def extract_process_features(session: Session) -> pd.DataFrame:
     df['write_char'] = df['write_char'].fillna(0) / (1024 * 1024)  # Now in MB
     df['io_total'] = df['read_char'] + df['write_char']  # MB (model expects this)
     df['io_ratio'] = df['read_char'] / (df['write_char'] + 0.001)
+    
+    # CPUs requested, logged: time falls as CPUs rise, with diminishing returns
+    df['log_cpus'] = np.log(df['cpus_requested'].where(df['cpus_requested'] > 0))
     
     # 4. CPU-Memory correlation
     df['cpu_mem_product'] = df['percent_cpu'] * df['peak_rss']

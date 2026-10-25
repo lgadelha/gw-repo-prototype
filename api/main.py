@@ -1352,7 +1352,7 @@ def train_ml_models(
         # Register per-process Bayesian models in database
         for process_name, process_results in training_results.get('per_process', {}).items():
             if process_results.get('status') == 'trained':
-                for resource_type in ['memory', 'time', 'cpu']:
+                for resource_type in ['memory', 'time']:
                     model_meta = Mlmodelmetadata(
                         process_name=process_name,
                         resource_type=resource_type,
@@ -1368,7 +1368,7 @@ def train_ml_models(
                     session.add(model_meta)
         
         # Register fallback models
-        for resource_type in ['memory', 'time', 'cpu']:
+        for resource_type in ['memory', 'time']:
             model_meta = Mlmodelmetadata(
                 process_name="_FALLBACK",
                 resource_type=resource_type,
@@ -1479,7 +1479,7 @@ def retrain_ml_models(
         # Register per-process Bayesian models
         for process_name, process_results in training_results.get('per_process', {}).items():
             if process_results.get('status') == 'trained':
-                for resource_type in ['memory', 'time', 'cpu']:
+                for resource_type in ['memory', 'time']:
                     model_meta = Mlmodelmetadata(
                         process_name=process_name,
                         resource_type=resource_type,
@@ -1612,7 +1612,7 @@ def round_time(seconds: float, minimum_seconds: int = 3600) -> str:
     safe_seconds = seconds
     
     if safe_seconds < 3600:
-        return "1h"
+        return f"{int(np.ceil(safe_seconds / 60))}m"  # only below 1 h with a lower minimum_seconds
     elif safe_seconds < 86400:
         hours = int(safe_seconds / 3600)
         mins = int((safe_seconds % 3600) / 60)
@@ -2047,8 +2047,9 @@ def get_all_optimizations(
     try:
         # Load trained Bayesian models
         try:
-            from ml.bayesian_predictor import BayesianResourcePredictor
+            from ml.bayesian_predictor import BayesianResourcePredictor, cpu_setting
             from nfcore_modules import normalize_module_name, get_nfcore_modules
+            import pandas as pd
         except ImportError as e:
             return {
                 "success": False,
@@ -2125,8 +2126,6 @@ def get_all_optimizations(
             
             # Calculate historical medians for ALL data size features
             median_disk = safe_mean([r.get('disk_usage_mb') for r in rows]) or 1.0
-            median_read_char = safe_mean([r.get('read_char', 0) or 0 for r in rows])
-            median_write_char = safe_mean([r.get('write_char', 0) or 0 for r in rows])
             
             # Get disk size percentiles for scaling
             disk_values = [r['disk_usage_mb'] for r in rows if r.get('disk_usage_mb') and r['disk_usage_mb'] > 0]
@@ -2163,40 +2162,18 @@ def get_all_optimizations(
                 size_scenarios = [('MEDIUM', median_disk)]
                 scenario_warnings['insufficient_data'] = f"Only {len(disk_values)} historical runs. Using historical averages instead of ML predictions."
             
+            # CPUs from past usage, capped at the request (the same for every size)
+            try:
+                cpus = int(cpu_setting(pd.DataFrame(rows))['final_with_safety'])
+            except (ValueError, KeyError):
+                cpus = None
+            
             for size_name, disk_mb in size_scenarios:
-                # Calculate scaling factor relative to historical median
-                scale_factor = disk_mb / max(median_disk, 0.001)
-                
-                # Build feature vector for this scenario - scale ALL data size features
-                # IMPORTANT: Use EXACT feature names that model was trained with
-                # For PER-PROCESS models: NO process_base (each model is process-specific)
+                # Feature vector for this scenario (the model's features)
                 scenario_features = {
-                    # Process identity
-                    'has_module': 1 if ':' in (rows[0]['process_name'] if rows else '') else 0,
-                    
-                    # Data size features (ALL scaled proportionally)
                     'disk_intensity': disk_mb,
-                    'disk_io_total': (median_read_char + median_write_char) * scale_factor,
-                    'disk_io_ratio': median_read_char / (median_write_char + 0.001),
-                    
-                    # Utilization metrics
-                    'cpu_utilization': safe_mean([r.get('percent_cpu') for r in rows]) / 100.0,
-                    'memory_utilization': safe_mean([r.get('percent_memory') for r in rows]) / 100.0,
-                    
-                    # Legacy I/O features (scaled) - model expects these
-                    'io_total': (median_read_char + median_write_char) * scale_factor,
-                    'io_ratio': 1.0,
-                    
-                    # Interaction features
-                    'cpu_mem_product': safe_mean([r.get('percent_cpu') for r in rows]) * safe_mean([r.get('peak_rss') for r in rows]),
-                    
-                    # Size category encoding
-                    'size_category_encoded': 0.0 if size_name == 'SMALL' else (1.0 if size_name == 'MEDIUM' else 2.0),
-                    
-                    # Per-GB features (scale with size) - these are what CPU model SHOULD use
-                    'memory_per_gb': (safe_mean([r.get('peak_rss') for r in rows]) / max(median_disk / 1000, 0.001)) * scale_factor,
-                    'time_per_gb': (safe_mean([r.get('duration') for r in rows]) / max(median_disk / 1000, 0.001)) * scale_factor,
-                    'cpu_per_gb': (safe_mean([r.get('percent_cpu') for r in rows]) / 100.0 / max(median_disk / 1000, 0.001)) * scale_factor,
+                    'log_disk_gb': np.log1p(disk_mb / 1000),
+                    'log_cpus': np.log(cpus or 1),
                 }
                 
                 # Get Bayesian predictions for this scenario
@@ -2205,8 +2182,8 @@ def get_all_optimizations(
                     
                     # Extract predictions with safety margins
                     memory_mb = bayesian_predictions['memory']['final_with_safety']
-                    time_sec = max(3600, bayesian_predictions['time']['final_with_safety'])  # Minimum 1 hour
-                    cpu_value = max(1, round(bayesian_predictions['cpu']['final_with_safety']))
+                    time_sec = max(MIN_TIME_SEC, bayesian_predictions['time']['final_with_safety'])
+                    cpu_value = cpus or 1
                     is_fallback = False
                 except Exception as pred_error:
                     # Fallback if prediction fails
@@ -2219,7 +2196,7 @@ def get_all_optimizations(
                     'cpus': cpu_value,
                     'is_fallback_model': is_fallback,
                     'memory': format_memory(memory_mb),
-                    'time': round_time(time_sec),
+                    'time': round_time(time_sec, MIN_TIME_SEC),
                     'disk_size_mb': round(disk_mb, 1)
                 }
             
@@ -2259,6 +2236,15 @@ class ResourceLimits(SQLModel):
     max_duration_sec: int = 86400  # 24 hours
 
 
+# Quantile of the predictive distribution recommended for each priority: the share of
+# tasks of that size expected to fit.
+PRIORITY_QUANTILES = {'cost': 0.80, 'balanced': 0.95, 'performance': 0.99}
+
+# Floor for recommended time limits: tasks shorter than this aren't worth a tighter
+# limit, and it absorbs scheduler and container start-up delays.
+MIN_TIME_SEC = 600
+
+
 class OptimizeForSizeRequest(SQLModel):
     """Request model for interactive optimization endpoint."""
     process_name: str
@@ -2281,7 +2267,7 @@ def optimize_for_data_size(
     priority = request.priority
     """
     Generate optimized config for user-specified data size.
-    Uses Bayesian models with dynamic safety margins based on uncertainty.
+    Uses Bayesian models; recommends a quantile of the predictive distribution.
     
     Args:
         process_name: Normalized process name (e.g., "BCFTOOLS_FILTER")
@@ -2290,7 +2276,7 @@ def optimize_for_data_size(
         priority: "balanced", "cost", or "performance"
     """
     try:
-        from ml.bayesian_predictor import BayesianResourcePredictor
+        from ml.bayesian_predictor import BayesianResourcePredictor, cpu_setting, history_predictions, size_spread
         from ml.features import extract_process_features
         
         # Get historical data using existing feature extraction
@@ -2305,72 +2291,58 @@ def optimize_for_data_size(
                 'error': f'No historical data found for process: {process_name}'
             }
         
-        if len(df) < 10:
-            return {
-                'success': False,
-                'error': f'Insufficient historical data ({len(df)} runs, need ≥10)',
-                'recommendation': 'Run workflow more times or use fallback model'
-            }
-        
-        # Load or train Bayesian model
-        predictor = BayesianResourcePredictor()
-        
-        # Try to load pre-trained models
-        if not predictor.load_model(process_name):
-            # Train on-the-fly
-            predictor.train(process_name, df)
-        
-        # Build feature vector for user's data size
-        historical_avg = {
-            'disk_gb': df['disk_usage_mb'].mean() / 1000,
-            'cpu_utilization': df['cpu_utilization'].mean(),
-            'memory_utilization': df['memory_utilization'].mean(),
-            'io_total': df['io_total'].mean(),
-            'io_ratio': df['io_ratio'].mean(),
-            'cpu_mem_product': df['cpu_mem_product'].mean(),
-            'memory_per_gb': df['memory_per_gb'].mean(),
-            'time_per_gb': df['time_per_gb'].mean(),
-            'cpu_per_gb': df['cpu_per_gb'].mean()
-        }
-        
-        # Scale features proportionally to user's data size
-        scaling_factor = expected_disk_gb / historical_avg['disk_gb']
-        
-        # Calculate new enhanced features for better CPU scaling
+        # Get predictions with uncertainty; the priority picks the quantile recommended
         import numpy as np
-        log_disk_gb = np.log1p(expected_disk_gb)
-        disk_cpu_interaction = expected_disk_gb * (historical_avg['cpu_utilization'] + 0.001)
-        io_per_cpu = (historical_avg['io_total'] * scaling_factor) / (historical_avg['cpu_utilization'] + 1)
-        memory_cpu_ratio = historical_avg['memory_per_gb'] / (historical_avg['cpu_per_gb'] / 100 + 0.001)
-        
-        features = {
-            'disk_intensity': expected_disk_gb * 1000,  # In MB
-            'cpu_utilization': historical_avg['cpu_utilization'],
-            'memory_utilization': historical_avg['memory_utilization'],
-            'io_total': historical_avg['io_total'] * scaling_factor,
-            'io_ratio': historical_avg['io_ratio'],
-            'cpu_mem_product': historical_avg['cpu_mem_product'],
-            'memory_per_gb': historical_avg['memory_per_gb'],
-            'time_per_gb': historical_avg['time_per_gb'],
-            'cpu_per_gb': historical_avg['cpu_per_gb'],
-            'size_category_encoded': 1.0,  # Medium
-            # New enhanced features
-            'log_disk_gb': log_disk_gb,
-            'disk_cpu_interaction': disk_cpu_interaction,
-            'io_per_cpu': io_per_cpu,
-            'memory_cpu_ratio': memory_cpu_ratio
-        }
-        
-        # Get predictions with uncertainty
-        predictions = predictor.predict(process_name, features)
-        
-        # Check extrapolation warnings
+        quantile = PRIORITY_QUANTILES.get(priority, PRIORITY_QUANTILES['balanced'])
+        sizes = df['disk_usage_mb']
         warnings = []
-        hist_min_gb = df['disk_usage_mb'].min() / 1000
-        hist_max_gb = df['disk_usage_mb'].max() / 1000
-        
+
+        # The size model needs 10 attempts with an input size that vary in size;
+        # otherwise the settings come from the process's past usage alone.
+        history_reason = None
+        if sizes.notna().sum() < 10:
+            history_reason = f"{int(sizes.notna().sum())} completed attempts with an input size, need ≥10"
+        elif size_spread(sizes) < 0.2:
+            history_reason = "input sizes barely vary"
+        else:
+            predictor = BayesianResourcePredictor()
+            # Load the trained model, or train on-the-fly
+            if not predictor.load_model(process_name) and not predictor.train(process_name, df).get('success'):
+                history_reason = "too few attempts with valid usage for a size model"
+
+        if history_reason:
+            source = 'history'
+            predictions = history_predictions(df, quantile)
+            n = predictions['memory']['samples']
+            warnings.append(
+                f"From history, no size model ({history_reason}): the settings are the "
+                f"{quantile * 100:.0f}th percentile of {n} completed attempts and don't depend on the input size."
+            )
+            if n < 10:
+                warnings.append(f"Only {n} completed attempts: the percentile is a rough estimate.")
+        else:
+            source = 'model'
+            # CPUs from past usage; time is predicted for that many
+            cpu = cpu_setting(df, quantile)
+            features = {
+                'disk_intensity': expected_disk_gb * 1000,  # In MB
+                'log_disk_gb': np.log1p(expected_disk_gb),
+                'log_cpus': np.log(cpu['final_with_safety']),
+            }
+            predictions = predictor.predict(process_name, features, quantile)
+            predictions['cpu'] = cpu
+
+        if predictions['cpu'].get('capped_by_request'):
+            warnings.append(
+                f"CPU usage reached the {predictions['cpu']['requested']} CPUs requested: "
+                f"the process might use more if given more."
+            )
+
+        hist_min_gb = sizes.min() / 1000
+        hist_max_gb = sizes.max() / 1000
+
         # Warning A: Outside historical range
-        if expected_disk_gb < hist_min_gb or expected_disk_gb > hist_max_gb:
+        if source == 'model' and (expected_disk_gb < hist_min_gb or expected_disk_gb > hist_max_gb):
             warnings.append(
                 f"Input size ({expected_disk_gb} GB) is outside historical range "
                 f"({hist_min_gb:.1f} - {hist_max_gb:.1f} GB). Predictions may be less accurate."
@@ -2385,27 +2357,8 @@ def optimize_for_data_size(
                     f"Consider running more historical executions."
                 )
         
-        # Apply priority-based adjustments
-        if priority == "cost":
-            # Reduce safety margins by 50% (accept higher risk)
-            for k in predictions:
-                original_margin = predictions[k]['safety_margin']
-                predictions[k]['safety_margin'] = original_margin * 0.5
-                predictions[k]['final_with_safety'] = (
-                    predictions[k]['prediction'] * (1 + predictions[k]['safety_margin'])
-                )
-        elif priority == "performance":
-            # Increase safety margins by 20% (conservative)
-            for k in predictions:
-                original_margin = predictions[k]['safety_margin']
-                predictions[k]['safety_margin'] = original_margin * 1.2
-                predictions[k]['final_with_safety'] = (
-                    predictions[k]['prediction'] * (1 + predictions[k]['safety_margin'])
-                )
-        # "balanced" = use Bayesian uncertainty-based margins (no adjustment)
-        
-        # Enforce minimum 1 hour time limit (Nextflow constraint)
-        min_time_sec = 3600  # 1 hour minimum
+        # Enforce the minimum time limit
+        min_time_sec = MIN_TIME_SEC
         if predictions['time']['final_with_safety'] < min_time_sec:
             predictions['time']['final_with_safety'] = min_time_sec
             predictions['time']['enforced_minimum'] = True
@@ -2434,7 +2387,7 @@ def optimize_for_data_size(
             elif resource_type == 'memory':
                 limit = resource_limits.max_memory_mb
             else:  # time
-                limit = max(min_time_sec, resource_limits.max_duration_sec)  # Respect 1h minimum
+                limit = max(min_time_sec, resource_limits.max_duration_sec)  # Respect the minimum
             
             # Cap at user-provided limit
             if prediction_value > limit:
@@ -2460,6 +2413,7 @@ def optimize_for_data_size(
         
         # Format time for Nextflow (1h, 30m, 3600s format)
         def format_nextflow_time(seconds):
+            seconds = np.ceil(seconds / 60) * 60  # whole minutes, rounded up so the setting isn't cut
             if seconds >= 3600:
                 hours = int(seconds // 3600)
                 remaining = seconds % 3600
@@ -2483,13 +2437,13 @@ def optimize_for_data_size(
         memory = {memory_mb:.0f}.MB
         time = {time_formatted}
         
-        // Bayesian prediction with uncertainty
-        // Input data size: {expected_disk_gb} GB
+        // {'Bayesian prediction with uncertainty' if source == 'model' else 'From history, no size model: ' + history_reason}
+        // {'Input data size: ' + str(expected_disk_gb) + ' GB' if source == 'model' else 'Settings: ' + format(quantile * 100, '.0f') + 'th percentile of past use'}
         // Memory: {max(0, predictions['memory']['prediction']):.0f} MB ±{predictions['memory']['uncertainty']:.0f} MB (CV={predictions['memory']['cv']:.0%})
         // Time: {max(0, predictions['time']['prediction']):.0f} sec ±{predictions['time']['uncertainty']:.0f} sec (CV={predictions['time']['cv']:.0%})
         // 95% CI Memory: [{max(0, predictions['memory']['confidence_interval']['lower']):.0f}, {predictions['memory']['confidence_interval']['upper']:.0f}] MB
         // 95% CI Time: [{max(0, predictions['time']['confidence_interval']['lower']):.0f}, {predictions['time']['confidence_interval']['upper']:.0f}] sec
-        // Minimum 1 hour enforced: {'Yes' if predictions['time']['enforced_minimum'] else 'No'} ({time_formatted})
+        // Minimum {MIN_TIME_SEC // 60} min enforced: {'Yes' if predictions['time']['enforced_minimum'] else 'No'} ({time_formatted})
     }}
 }}
 """
@@ -2504,11 +2458,12 @@ def optimize_for_data_size(
             'nextflow_config': nextflow_config,
             'historical_runs_used': len(df),
             'historical_size_range_gb': {
-                'min': float(hist_min_gb),
-                'max': float(hist_max_gb)
+                'min': None if np.isnan(hist_min_gb) else float(hist_min_gb),
+                'max': None if np.isnan(hist_max_gb) else float(hist_max_gb)
             },
             'warnings': warnings,
-            'model_type': 'BayesianRidge'
+            'source': source,  # 'model' (size model) or 'history' (past usage percentile)
+            'model_type': 'BayesianRidge' if source == 'model' else None
         }
         
     except Exception as e:
