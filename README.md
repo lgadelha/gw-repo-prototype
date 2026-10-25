@@ -312,17 +312,18 @@ Two or more runs against a baseline:
 #### Bayesian modelling
 
 Per-process resource predictions (see [ML Resource Prediction](#ml-resource-prediction)),
-in three tabs. **Prediction settings** above them hold the priority (balanced, cost or
-performance safety margins) and the resource limits, which cap every prediction.
+in three tabs. **Prediction settings** above them hold the priority (the percentile
+recommended: cost 80 %, balanced 95 %, performance 99 %) and the resource limits, which cap every prediction.
 - **Training:** which processes have a model, with their training samples, and **Train
   models**. A process needs at least 10 completed attempts with an input size (from
-  `lineage-import`). Training replaces all models.
+  `lineage-import`). Training replaces all models. Processes without one get settings from
+  their past usage.
 - **Optimizer:** one process (kept in the URL as `?process=`, shared with Process
   profile) and an input size. It shows the recommended memory, time and CPUs, each with
-  the model's prediction, 95 % interval and safety margin; charts of the process's past
+  the model's prediction, 95 % interval and the percentile used; charts of the process's past
   attempts against input size with the prediction marked; and the Nextflow settings to
   download.
-- **All processes:** the same for every process with a model, at the median or largest
+- **All processes:** the same for every process, at the median or largest
   input size seen per process, or one size for all, with one combined config to download.
 
 ## RO-Crate export
@@ -382,7 +383,7 @@ and versions for the processes, the crate's author and publisher.
 **Why Bayesian Ridge:**
 - Provides uncertainty estimates (CV, confidence intervals)
 - Handles small datasets with scenario-based priors
-- Dynamic safety margins based on uncertainty
+- Settings from the predictive distribution's uncertainty
 - Better extrapolation beyond training data
 - Per-process models with automatic regularization
 
@@ -394,39 +395,31 @@ and versions for the processes, the crate's author and publisher.
   - 10-30 runs: moderate priors
   - <10 runs: strong regularization
 - StandardScaler for feature normalization
-- Models saved as `_bayesian.pkl` files
+- Models (memory and time) saved as `_bayesian.pkl` files; models trained with another
+  feature set are ignored until retrained
 
 **Prediction:**
 - 95% confidence intervals for all predictions
 - Coefficient of variation (CV) for uncertainty
-- Dynamic safety margins:
-  - CV < 10%: 5% margin (high confidence)
-  - CV 10-20%: 15% margin (medium confidence)
-  - CV > 20%: 30% margin (low confidence)
-- Minimum 1 core for CPU, 256 MB for memory, 1 hour for time
+- Recommended setting: a quantile of the predictive distribution, chosen by the priority
+  (cost 80 %, balanced 95 %, performance 99 %); about that share of tasks of the given
+  input size would fit
+- CPUs: no model. The priority's percentile of the CPUs past attempts used, rounded up and
+  no more than the most they requested. Usage can't exceed the request, so when it reached
+  it the response flags `capped_by_request`: the process might use more if given more
+- Minimum 1 core for CPU, 256 MB for memory, 10 minutes for time
 - User-provided resource limits enforced as hard caps
 
-### Features Used (14 total)
+### Features Used
+
+Only what is known before a task runs. Features computed from a task's own peak RSS,
+CPU use, duration or I/O would leak the values being predicted.
 
 | Feature | Description | Why It Matters |
 |---------|-------------|----------------|
-| `has_module` | 1 if process has module prefix | Distinguishes tool vs custom script |
-| `disk_intensity` | Task input size in MB (its input files, from `lineage-import`) | Direct measure of data size |
-| `disk_io_total` | Read + write bytes (MB) | I/O volume affects runtime |
-| `disk_io_ratio` | Read/write ratio | Read-heavy vs write-heavy patterns |
-| `cpu_utilization` | CPU % / 100 | How much CPU the process uses |
-| `memory_utilization` | Memory % / 100 | How much memory the process uses |
-| `io_total` | Trace I/O (rchar+wchar in MB) | Nextflow-reported I/O |
-| `io_ratio` | Trace I/O ratio | Read/write pattern from trace |
-| `cpu_mem_product` | CPU × memory correlation | Processes that use both heavily |
-| `size_category_encoded` | 0=small, 1=medium, 2=large | Dataset size category |
-| `memory_per_gb` | Memory efficiency (MB per GB data) | Normalized memory usage |
-| `time_per_gb` | Time efficiency (sec per GB data) | Normalized runtime |
-| `cpu_per_gb` | CPU efficiency (cores per GB data) | Normalized CPU usage |
+| `disk_intensity` | Task input size in MB: its sample input files, from `lineage-import`. Reference files (genome, index, annotation) don't count: an input is one when a task of the same process for another sample has the same file, by path or SHA-256 | Direct measure of data size |
 | `log_disk_gb` | Log-scaled data size | Captures diminishing returns |
-| `disk_cpu_interaction` | CPU × data size | Explicit scaling relationship |
-| `io_per_cpu` | I/O per core | I/O pressure per CPU |
-| `memory_cpu_ratio` | Memory/CPU balance | Resource balance indicator |
+| `log_cpus` | Log of the CPUs requested; at prediction, the recommended CPUs | Time falls as CPUs rise |
 
 ### Per-Process Models
 
@@ -438,8 +431,14 @@ and versions for the processes, the crate's author and publisher.
 **How it works:**
 ```
 BCFTOOLS_FILTER has 24 samples? → Train BCFTOOLS_FILTER model ✅
-BCFTOOLS_FILTER has 3 samples?  → No model ❌
+BCFTOOLS_FILTER has 3 samples?  → No model ❌ → settings from history
 ```
+
+**From history:** when a process has fewer than 10 completed attempts with an input size,
+its input sizes barely vary ((p90 − p10) / median < 0.2), or no model can be trained,
+`/ml/optimize-for-size` recommends the priority's percentile of its completed attempts'
+peak RSS, duration and CPUs used instead, independent of the input size. The response
+says which with `source` (`model` or `history`).
 
 ### Resource Limits
 

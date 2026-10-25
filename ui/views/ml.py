@@ -1,8 +1,8 @@
 """Bayesian modelling (Optimization nav group): one BayesianRidge model per process
 (api/ml), trained on completed attempts, predicting memory, time and CPUs for a given
-input size, with Nextflow settings to download. Tabs: Training, Optimizer (one
-process) and All processes. The model is unchanged until the ML rework
-(PLAN-provenance-ideas.md item 1)."""
+input size, with Nextflow settings to download. Processes without a size model get
+settings from their past usage. Tabs: Training, Optimizer (one process) and All
+processes."""
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -13,8 +13,9 @@ from common import (API_BASE_URL, api_get, api_key, clear_api_cache, empty_state
                     normalize_module_name, run_colours)
 
 PRIORITIES = {'balanced': "Balanced", 'cost': "Cost", 'performance': "Performance"}
-PRIORITY_HELP = ("**Balanced:** safety margin from the model's uncertainty (5, 15 or 30 %). "
-                 "**Cost:** half that margin, more risk of running out. **Performance:** 20 % more margin.")
+PRIORITY_HELP = ("The setting is a percentile of the model's prediction (or of past usage, for processes "
+                 "without a size model): about that share of tasks would fit. **Cost:** 80th, more risk of "
+                 "running out. **Balanced:** 95th. **Performance:** 99th.")
 # Per resource: model target column of the history, axis label, how to show a value.
 RESOURCES = {'memory': ('peak_rss', 'Peak RSS (MB)', fmt_mb),
              'time': ('duration', 'Duration (s)', fmt_duration),
@@ -24,24 +25,24 @@ TITLES = {'memory': "Memory", 'time': "Time", 'cpu': "CPUs"}
 
 def render(all_runs: pd.DataFrame):
     st.title("Bayesian modelling")
-    st.caption(":material/history: The model is unchanged until the ML rework (PLAN-provenance-ideas.md item 1); "
-               "its data now follows the current database: completed attempts, input sizes from lineage-import.")
+    names = pd.DataFrame(api_get("/process_names") or [])
+    if names.empty:
+        empty_state("No tasks recorded yet.")
+        return
+    names['module'] = names['process'].map(normalize_module_name)
     models = api_get("/ml/models/") or []
     trained = {m['process_name']: m['training_samples'] for m in models if not m.get('is_fallback_model')}
+    # Every process, those with a size model first
+    processes = sorted(names['module'].unique(), key=lambda p: (-trained.get(p, 0), p))
     settings = _settings()
     training, optimizer, bulk = st.tabs([":material/model_training: Training", ":material/tune: Optimizer",
                                          ":material/checklist: All processes"])
     with training:
-        _training(models, trained)
-    if not trained:
-        for tab in (optimizer, bulk):
-            with tab:
-                empty_state("No trained models yet: train them in the Training tab.")
-        return
+        _training(names, models, trained)
     with optimizer:
-        _optimizer(trained, settings, all_runs)
+        _optimizer(processes, trained, settings, all_runs)
     with bulk:
-        _all_processes(trained, settings)
+        _all_processes(processes, trained, settings)
 
 
 def _post(path: str, body: dict, timeout: int):
@@ -85,12 +86,7 @@ def history(process: str) -> pd.DataFrame:
     return tasks
 
 
-def _training(models, trained):
-    names = pd.DataFrame(api_get("/process_names") or [])
-    if names.empty:
-        empty_state("No tasks recorded yet.")
-        return
-    names['module'] = names['process'].map(normalize_module_name)
+def _training(names, models, trained):
     per_module = names.groupby('module').agg(runs=('runs', 'max'), tasks=('tasks', 'sum')).reset_index()
     per_module['samples'] = per_module['module'].map(trained)
     per_module['model'] = per_module['samples'].notna()
@@ -99,13 +95,14 @@ def _training(models, trained):
     c = st.columns(4)
     kpi(c[0], "Processes with a model", f"{len(trained)} of {len(per_module)}")
     kpi(c[1], "Training samples", int(sum(trained.values())), "completed attempts with an input size")
-    kpi(c[2], "Without a model", int((~per_module['model']).sum()), "fewer than 10 usable attempts")
+    kpi(c[2], "Without a model", int((~per_module['model']).sum()), "settings from past usage instead")
     kpi(c[3], "Last trained", created.strftime('%Y-%m-%d') if pd.notna(created) else "never",
         created.strftime('%H:%M') if pd.notna(created) else None)
 
     st.caption("One model per process with at least 10 completed attempts that have an input size (from "
                "lineage-import), predicting peak memory, duration and CPUs used from the input size and the "
-               "process's usage profile. Training replaces all models.")
+               "process's usage profile. Training replaces all models. Processes without one, or whose input "
+               "sizes barely vary, get a percentile of their past usage instead.")
     if st.button("Train models", type="primary", icon=":material/model_training:"):
         with st.spinner("Training models…"):
             result = _post("/ml/train", {}, timeout=600)
@@ -139,39 +136,46 @@ def _settings() -> dict:
             'limits': {'max_cpus': int(cpus), 'max_memory_mb': memory_gb * 1024, 'max_duration_sec': int(hours * 3600)}}
 
 
-def _optimizer(trained, settings, all_runs):
-    options = sorted(trained, key=lambda p: (-trained[p], p))
+def _optimizer(processes, trained, settings, all_runs):
     current = st.session_state.get('process') or st.query_params.get('process')
     current = normalize_module_name(current) if current else None
-    process = st.selectbox("Process", options, index=options.index(current) if current in options else 0,
-                           format_func=lambda p: f"{p} ({trained[p]} training samples)", key='ml_process')
+    process = st.selectbox("Process", processes, index=processes.index(current) if current in processes else 0,
+                           format_func=lambda p: f"{p} ({trained[p]} training samples)" if p in trained
+                           else f"{p} (from history)", key='ml_process')
     st.session_state['process'] = process
     st.query_params['process'] = process
 
     tasks = history(process)
-    sized = tasks[tasks['input_mb'].notna()] if not tasks.empty else tasks
-    if sized.empty:
-        empty_state("No completed attempts of this process have an input size: run lineage-import for its runs.")
+    if tasks.empty:
+        empty_state("No completed attempts of this process yet.")
         return
-    lo, hi = sized['input_mb'].min(), sized['input_mb'].max()
+    sized = tasks[tasks['input_mb'].notna()]
     c = st.columns(4)
     kpi(c[0], "Completed attempts", len(tasks), f"{tasks['workflow_execution_id'].nunique()} runs")
     kpi(c[1], "With an input size", len(sized))
-    kpi(c[2], "Median input size", _fmt_size(sized['input_mb'].median()), f"{_fmt_size(lo)} – {_fmt_size(hi)}")
+    if sized.empty:
+        kpi(c[2], "Median input size", "–", "run lineage-import for its runs")
+    else:
+        lo, hi = sized['input_mb'].min(), sized['input_mb'].max()
+        kpi(c[2], "Median input size", _fmt_size(sized['input_mb'].median()), f"{_fmt_size(lo)} – {_fmt_size(hi)}")
     kpi(c[3], "Median peak RSS", fmt_mb(tasks['peak_rss'].median()))
 
-    size_mb = st.number_input("Input size (MB)", min_value=0.001, value=round(float(sized['input_mb'].median()), 3),
-                              step=1.0, format="%.3f", key=f'ml_size_{process}',
-                              help="The task's total input size: the sum of its input files.")
-    if size_mb < lo or size_mb > hi:
-        st.warning(f"Outside the sizes seen so far ({_fmt_size(lo)} – {_fmt_size(hi)}): the prediction "
-                   "extrapolates.", icon=":material/warning:")
+    size_mb = 0.0
+    if not sized.empty:
+        size_mb = st.number_input("Input size (MB)", min_value=0.001,
+                                  value=round(float(sized['input_mb'].median()), 3), step=1.0, format="%.3f",
+                                  key=f'ml_size_{process}', help="The task's sample input size: the sum of its input files, without reference "
+                                       "files shared by the process's other tasks.")
     result = predict(process, size_mb, settings)
     if not result:
         return
     if not result.get('success'):
         st.error(f"Prediction failed: {result.get('error')}", icon=":material/error:")
         return
+    from_history = result.get('source') == 'history'
+    if not from_history and not sized.empty and (size_mb < lo or size_mb > hi):
+        st.warning(f"Outside the sizes seen so far ({_fmt_size(lo)} – {_fmt_size(hi)}): the prediction "
+                   "extrapolates.", icon=":material/warning:")
     for warning in result.get('warnings') or []:
         st.warning(warning, icon=":material/warning:")
 
@@ -179,15 +183,21 @@ def _optimizer(trained, settings, all_runs):
     c = st.columns(3)
     for column, resource in zip(c, RESOURCES):
         kpi(column, TITLES[resource], _fmt(resource, predictions[resource]['final_with_safety']),
-            _detail(resource, predictions[resource]))
+            _detail(resource, predictions[resource], from_history or resource == 'cpu'))
 
     names = ({r.id: r.run_name if isinstance(r.run_name, str) and r.run_name else r.id[:8]
               for r in all_runs.itertuples()} if not all_runs.empty else {})
     for tab, resource in zip(st.tabs(list(TITLES.values())), RESOURCES):
         with tab:
-            st.plotly_chart(_history_chart(sized, resource, size_mb, predictions[resource], names), width="stretch")
-    st.caption("Points: the process's completed attempts with an input size. Diamond: the prediction for your "
-               "input size with its 95 % interval; dashed line: the setting, with its safety margin.")
+            st.plotly_chart(_history_chart(tasks if sized.empty else sized, resource, None if sized.empty else size_mb,
+                                           predictions[resource], names), width="stretch")
+    if from_history:
+        st.caption("Points: the process's completed attempts. Diamond: their median with the 2.5–97.5 % range; "
+                   "dashed line: the setting, the chosen percentile of past use.")
+    else:
+        st.caption("Points: the process's completed attempts with an input size. Diamond: the prediction for your "
+                   "input size with its 95 % interval (CPUs: the median used); dashed line: the setting, the chosen "
+                   "percentile.")
 
     st.subheader("Nextflow settings")
     st.code(result['nextflow_config'], language='groovy')
@@ -196,16 +206,20 @@ def _optimizer(trained, settings, all_runs):
 
 
 def _history_chart(tasks, resource, size_mb, prediction, names):
+    """Past attempts against input size, with the prediction at `size_mb`; without input
+    sizes (`size_mb` None), against their run, with the prediction beside them."""
     column, label, _ = RESOURCES[resource]
     colours = run_colours(names)
     fig = go.Figure()
     for wf, group in tasks.groupby('workflow_execution_id'):
         name = names.get(wf, wf[:8])
-        fig.add_trace(go.Scatter(x=group['input_mb'], y=group[column], mode='markers', name=name,
+        x = group['input_mb'] if size_mb is not None else [name] * len(group)
+        fig.add_trace(go.Scatter(x=x, y=group[column], mode='markers', name=name,
                                  marker=dict(color=colours.get(name)), text=group['task_name'],
                                  hovertemplate="%{text}<br>%{x:.1f} MB → %{y:.1f}<extra></extra>"))
     ci = prediction['confidence_interval']
-    fig.add_trace(go.Scatter(x=[size_mb], y=[prediction['prediction']], mode='markers', name='Prediction',
+    fig.add_trace(go.Scatter(x=[size_mb if size_mb is not None else 'Prediction'], y=[prediction['prediction']],
+                             mode='markers', name='Prediction',
                              marker=dict(symbol='diamond', size=13, color='#0f172a', line=dict(width=1, color='white')),
                              error_y=dict(type='data', symmetric=False, array=[ci['upper'] - prediction['prediction']],
                                           arrayminus=[prediction['prediction'] - ci['lower']])))
@@ -213,12 +227,12 @@ def _history_chart(tasks, resource, size_mb, prediction, names):
     if not prediction.get('enforced_minimum'):
         fig.add_hline(y=setting, line_dash='dash', line_color='#64748b',
                       annotation_text=f"setting {_fmt(resource, setting)}", annotation_position='top left')
-    fig.update_layout(xaxis_title="Input size (MB)", yaxis_title=label, legend_title_text="Run", height=420,
+    fig.update_layout(xaxis_title="Input size (MB)" if size_mb is not None else "Run", yaxis_title=label, legend_title_text="Run", height=420,
                       margin=dict(t=30))
     return fig
 
 
-def _all_processes(trained, settings):
+def _all_processes(processes, trained, settings):
     c = st.columns([2, 1])
     strategy = c[0].radio("Input size per process", ['median', 'max', 'same'], horizontal=True,
                           format_func={'median': "Median seen", 'max': "Largest seen",
@@ -227,17 +241,19 @@ def _all_processes(trained, settings):
                                 disabled=strategy != 'same')
     rows, configs = [], []
     progress = st.progress(0.0, text="Predicting…")
-    for i, process in enumerate(sorted(trained)):
-        progress.progress((i + 1) / len(trained), text=f"Predicting {process}…")
+    for i, process in enumerate(sorted(processes)):
+        progress.progress((i + 1) / len(processes), text=f"Predicting {process}…")
         sizes = history(process)
         sizes = sizes['input_mb'].dropna() if not sizes.empty else pd.Series(dtype=float)
         size_mb = same_mb if strategy == 'same' else (sizes.median() if strategy == 'median' else sizes.max())
-        row = {'process': process, 'samples': trained[process], 'input_mb': size_mb}
-        result = predict(process, float(size_mb), settings) if pd.notna(size_mb) else None
+        row = {'process': process, 'samples': trained.get(process), 'input_mb': size_mb}
+        result = predict(process, float(size_mb) if pd.notna(size_mb) else 0.0, settings)
         if result and result.get('success'):
             p = result['predictions']
+            row['source'] = "history" if result.get('source') == 'history' else "model"
             notes = [f"{TITLES[r].lower()} capped" for r in RESOURCES if p[r].get('capped_by_limit')]
-            notes += ["time raised to 1 h"] if p['time'].get('enforced_minimum') else []
+            notes += ["CPU use reached the request"] if p['cpu'].get('capped_by_request') else []
+            notes += ["time raised to 10 min"] if p['time'].get('enforced_minimum') else []
             uncertain = sum('uncertainty' in w for w in result.get('warnings') or [])
             notes += [f"{uncertain} uncertain"] if uncertain else []
             row.update(memory=fmt_mb(p['memory']['final_with_safety']),
@@ -245,13 +261,14 @@ def _all_processes(trained, settings):
                        cpus=int(round(p['cpu']['final_with_safety'])), notes=", ".join(notes))
             configs.append(result['nextflow_config'])
         else:
-            row['notes'] = (result or {}).get('error') or "no input sizes"
+            row['notes'] = (result or {}).get('error') or "prediction failed"
         rows.append(row)
     progress.empty()
 
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch",
                  column_config={'process': 'Process', 'samples': st.column_config.NumberColumn('Samples', format="%d"),
                                 'input_mb': st.column_config.NumberColumn('Input size (MB)', format="%.1f"),
+                                'source': 'From',
                                 'memory': 'Memory', 'time': 'Time', 'cpus': 'CPUs', 'notes': 'Notes'})
     if configs:
         combined = "\n".join(configs)
@@ -269,13 +286,19 @@ def _fmt_size(mb):
     return fmt_mb(mb) if mb >= 1 else f"{mb * 1000:.0f} kB"
 
 
-def _detail(resource, p):
+def _detail(resource, p, from_history=False):
     ci = p['confidence_interval']
     show = RESOURCES[resource][2]
-    parts = [f"Predicted {show(p['prediction'])}, 95 % interval {show(ci['lower'])} – {show(ci['upper'])}",
-             f"margin +{p['safety_margin']:.0%}"]
+    if from_history:
+        parts = [f"Median {show(p['prediction'])} over {p['samples']} attempts, 95 % range {show(ci['lower'])} – "
+                 f"{show(ci['upper'])}", f"setting at the {p['quantile'] * 100:.0f}th percentile of past use"]
+    else:
+        parts = [f"Predicted {show(p['prediction'])}, 95 % interval {show(ci['lower'])} – {show(ci['upper'])}",
+                 f"setting at the {p['quantile']:.0%} upper bound"]
     if p.get('enforced_minimum'):
-        parts.append("raised to the 1 h minimum")
+        parts.append("raised to the 10 min minimum")
     if p.get('capped_by_limit'):
         parts.append("capped at the limit")
+    if p.get('capped_by_request'):
+        parts.append(f"use reached the {p['requested']} requested: it might use more if given more")
     return "; ".join(parts)
